@@ -1,29 +1,54 @@
-/apihub
-/data/
-/web/node_modules/
-.env
-.admin-token
-.admin-password
+# Environment files at any depth; only the reviewed root template is public
+.env*
+*.env
+*.env.*
+!/.env.example
+.direnv/
 
-/bin/
-/coverage.out
-
-# Local credentials and runtime artifacts
-.env.*
-!.env.example
+# Local credentials, OAuth client secrets, and service account exports
 .admin-*
 .secrets/
-.run/
+/secrets/
+/credentials/
+credentials*.json
+client_secret*.json
+service-account*.json
+service_account*.json
+.npmrc
+.netrc
+*.pgpass
+pgpass.conf
+
+# Private keys and keystores
 *.pem
 *.key
+*.p8
 *.p12
 *.pfx
-*.pgpass
+*.jks
+*.keystore
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+
+# Build outputs, runtime state, backups, and logs
+/apihub
+/bin/
+/data/
+/web/node_modules/
+/.coverage/
+/coverage.out
+.run/
+/backups/
+/dumps/
 *.dump
 *.backup
 *.rdb
 *.aof
 *.log
+.psql_history
+.rediscli_history
 coverage/
 web/dogfood-output/
 .DS_Store
