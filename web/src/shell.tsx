@@ -6,6 +6,7 @@ import {
   ChevronRight,
   CircleGauge,
   ClipboardCheck,
+  ExternalLink,
   KeyRound,
   Layers3,
   LifeBuoy,
@@ -388,6 +389,18 @@ export function Shell() {
               {item.label}
             </NavLink>
           ))}
+          <a
+            href="https://github.com/emaisi/connara"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="GitHub 仓库（在新标签页打开）"
+            title="GitHub 仓库（在新标签页打开）"
+            onClick={() => setMobileOpen(false)}
+            className="flex min-h-10 items-center gap-3 rounded-xl px-3 py-2 text-xs text-[var(--muted-text)] transition hover:bg-[var(--muted)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-blue-500"
+          >
+            <ExternalLink aria-hidden="true" className="size-4 shrink-0" />
+            GitHub
+          </a>
         </nav>
         <div ref={accountMenuRef} className="relative border-t border-[var(--border)] p-3">
           {accountOpen && (
