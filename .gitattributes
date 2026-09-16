@@ -1,0 +1,2 @@
+# Generated console bundles are committed for go:embed.
+internal/webui/static/assets/* linguist-generated -whitespace

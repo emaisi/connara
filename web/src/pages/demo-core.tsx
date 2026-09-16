@@ -1,0 +1,9 @@
+export { Tabs } from "./core-shared";
+export { DemoOverviewPage } from "./overview";
+export { GettingStartedPage } from "./getting-started";
+export { DemoProvidersPage } from "./systems";
+export { DemoIntegrationsPage } from "./integrations";
+export { DemoConnectionsPage } from "./connections";
+export { AuthMethodsPage } from "./auth-methods";
+export { DemoActionsPage } from "./actions";
+export { SyncTasksPage } from "./sync-tasks";

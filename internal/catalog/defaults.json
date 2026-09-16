@@ -1,0 +1,97 @@
+[
+  {
+    "service": "jsonplaceholder",
+    "displayName": "JSONPlaceholder",
+    "description": "Public test API for validating no-auth execution.",
+    "categories": ["Developer Tools"],
+    "authTypes": ["no_auth"],
+    "auth": [{"type": "no_auth"}],
+    "homepageUrl": "https://jsonplaceholder.typicode.com",
+    "x-apihub-base-url": "https://jsonplaceholder.typicode.com",
+    "actions": [
+      {
+        "id": "jsonplaceholder.get_post",
+        "service": "jsonplaceholder",
+        "name": "get_post",
+        "description": "Get one sample post by ID.",
+        "requiredScopes": [],
+        "providerPermissions": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {"id": {"type": "integer", "minimum": 1}},
+          "required": ["id"],
+          "additionalProperties": false
+        },
+        "outputSchema": {"type": "object"},
+        "x-apihub-runtime": {"method": "GET", "path": "/posts/{id}"}
+      },
+      {
+        "id": "jsonplaceholder.list_posts",
+        "service": "jsonplaceholder",
+        "name": "list_posts",
+        "description": "List sample posts.",
+        "requiredScopes": [],
+        "providerPermissions": [],
+        "inputSchema": {"type": "object", "additionalProperties": false},
+        "outputSchema": {"type": "array"},
+        "x-apihub-runtime": {"method": "GET", "path": "/posts"}
+      }
+    ]
+  },
+  {
+    "service": "github",
+    "displayName": "GitHub",
+    "description": "GitHub REST API using a personal access token.",
+    "categories": ["Developer Tools"],
+    "authTypes": ["api_key", "oauth2"],
+    "auth": [
+      {"type": "api_key", "label": "Personal access token"},
+      {
+        "type": "oauth2",
+        "authorizationUrl": "https://github.com/login/oauth/authorize",
+        "tokenUrl": "https://github.com/login/oauth/access_token",
+        "scopes": ["read:user"],
+        "tokenEndpointAuthMethod": "client_secret_post"
+      }
+    ],
+    "homepageUrl": "https://github.com",
+    "x-apihub-base-url": "https://api.github.com",
+    "x-apihub-credential": {
+      "field": "apiKey",
+      "in": "header",
+      "name": "Authorization",
+      "prefix": "Bearer "
+    },
+    "actions": [
+      {
+        "id": "github.get_authenticated_user",
+        "service": "github",
+        "name": "get_authenticated_user",
+        "description": "Get the account represented by the connection token.",
+        "requiredScopes": ["read:user"],
+        "providerPermissions": [],
+        "inputSchema": {"type": "object", "additionalProperties": false},
+        "outputSchema": {"type": "object"},
+        "x-apihub-runtime": {"method": "GET", "path": "/user"}
+      },
+      {
+        "id": "github.list_user_repositories",
+        "service": "github",
+        "name": "list_user_repositories",
+        "description": "List repositories visible to the connected user.",
+        "requiredScopes": ["repo"],
+        "providerPermissions": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "visibility": {"type": "string"},
+            "per_page": {"type": "integer", "minimum": 1, "maximum": 100}
+          },
+          "additionalProperties": false
+        },
+        "outputSchema": {"type": "array"},
+        "x-apihub-runtime": {"method": "GET", "path": "/user/repos"}
+      }
+    ]
+  }
+]

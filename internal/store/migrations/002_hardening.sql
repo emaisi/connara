@@ -1,0 +1,18 @@
+BEGIN;
+CREATE TABLE bootstrap_state (workspace_id uuid PRIMARY KEY, completed_at timestamptz NOT NULL DEFAULT now());
+COMMENT ON TABLE bootstrap_state IS '工作区首次初始化完成标记，防止覆盖用户配置';
+COMMENT ON COLUMN bootstrap_state.workspace_id IS '已初始化工作区';
+COMMENT ON COLUMN bootstrap_state.completed_at IS '初始化完成时间';
+INSERT INTO bootstrap_state(workspace_id) SELECT workspace_id FROM platform_settings ON CONFLICT DO NOTHING;
+ALTER TABLE sync_tasks ADD COLUMN sync_config jsonb NOT NULL DEFAULT '{}';
+COMMENT ON COLUMN sync_tasks.sync_config IS '记录路径、稳定主键路径、分页游标与请求参数';
+CREATE INDEX jobs_resource_active_idx ON jobs(workspace_id,kind,resource_id) WHERE status IN ('queued','running');
+CREATE INDEX jobs_terminal_cleanup_idx ON jobs(workspace_id,completed_at) WHERE status IN ('succeeded','dead');
+CREATE INDEX outbox_terminal_cleanup_idx ON outbox_events(workspace_id,published_at) WHERE status='published';
+CREATE INDEX webhook_terminal_cleanup_idx ON webhook_deliveries(workspace_id,created_at) WHERE status IN ('delivered','dead');
+CREATE INDEX systems_page_idx ON systems(workspace_id,updated_at DESC,id DESC) WHERE deleted_at IS NULL;
+CREATE INDEX actions_page_idx ON actions(workspace_id,updated_at DESC,id DESC) WHERE deleted_at IS NULL;
+CREATE INDEX connections_page_idx ON connections(workspace_id,updated_at DESC,id DESC) WHERE deleted_at IS NULL;
+CREATE INDEX user_sessions_cleanup_idx ON user_sessions(workspace_id,expires_at);
+INSERT INTO schema_migrations(version) VALUES(2);
+COMMIT;

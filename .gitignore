@@ -1,0 +1,34 @@
+/apihub
+/data/
+/web/node_modules/
+.env
+.admin-token
+.admin-password
+
+/bin/
+/coverage.out
+
+# Local credentials and runtime artifacts
+.env.*
+!.env.example
+.admin-*
+.secrets/
+.run/
+*.pem
+*.key
+*.p12
+*.pfx
+*.pgpass
+*.dump
+*.backup
+*.rdb
+*.aof
+*.log
+coverage/
+web/dogfood-output/
+.DS_Store
+
+# Local review reports (screenshots for the README live in docs/screenshots/)
+docs/ui-interaction-analysis-*.md
+docs/ui-interaction-fixes-*.md
+docs/hardening-progress.md
