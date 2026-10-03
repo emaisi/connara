@@ -8,7 +8,7 @@ Connara 是一个可自行部署的 API 集成平台，用于连接外部服务�
 
 系统把接口目录与认证、连接管理结合起来。后端使用 Go，React 管理界面直接嵌入应用二进制；基础部署只需要 **一个 Connara 进程、PostgreSQL 和 Redis**。
 
-![Connara 管理后台：集成总览](docs/screenshots/overview.zh-CN.png)
+![Connara 可视化工作流编辑器](docs/screenshots/overview.zh-CN.png)
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
@@ -64,32 +64,35 @@ OAuth 1.0a、服务商专用 HMAC、SAML 断言生成与验证、Kerberos/NTLM �
 
 ## 后台导航
 
-侧栏分为四个主入口，关联页面按组折叠；打开子页面时自动展开对应分组。
+侧栏直接显示六个常用业务入口，低频管理页面统一放在“更多功能”中。
 
 | 主入口 | 包含页面 |
 | --- | --- |
 | 概览 | 集成统计、最近活动和接入快捷入口 |
-| 集成管理 | 系统目录、认证中心、集成配置、连接账号 |
-| 调用与运行 | API 操作、运行中心 |
+| 系统 | 内置及自建系统、系统分组、认证模板关联和连接状态 |
+| API | 可复用 API 定义、系统与状态筛选、测试入口 |
+| 集成 | 系统、认证实例、基础地址和连接账号配置 |
+| 认证中心 | 认证模板、绑定系统的认证实例和账号 |
+| 运行记录 | API、同步、工作流、认证和 Webhook 执行记录 |
 | 更多功能 | 同步任务、工作流、Webhook、访问控制、审计日志、团队管理、平台设置 |
 
 **快速开始**和**开发者文档**固定放在侧栏底部。菜单随前端程序提供，不需要另外导入菜单 SQL。
 
 ## 后台截图
 
-系统目录、认证中心、API 操作和导航截图于 **2026-09-17** 从实际运行的后台获取；当前工作流编辑器截图于 **2026-10-04** 从内嵌前端的 8081 服务获取。项目已经更名为 Connara，但二进制和环境变量仍保留 APIHub 兼容名称，因此图片继续显示 APIHub 标题。截图不包含凭据或私有业务数据。
+本 README 的全部截图已于 **2026-10-04** 从当前内嵌管理后台重新采集。系统和 API 页面只展示筛选后的内置 GitHub 数据，认证中心只展示内置模板；自建系统、内网地址、凭据和运行记录均未进入公开图片。项目已经更名为 Connara，但界面标题、二进制和环境变量仍保留 APIHub 兼容名称。
 
 ### 系统目录
 
-![系统目录：内置 GitHub 和 JSONPlaceholder](docs/screenshots/systems.zh-CN.png)
+![当前系统目录：筛选后的内置 GitHub 系统](docs/screenshots/systems.zh-CN.png)
 
 ### 认证中心
 
-![认证中心：区分可直接使用的方式与需要扩展的模板](docs/screenshots/authentication.zh-CN.png)
+![当前认证中心：内置可执行认证模板](docs/screenshots/authentication.zh-CN.png)
 
 ### API 操作
 
-![API 操作定义与五步接入流程](docs/screenshots/actions.zh-CN.png)
+![当前 API 页面：筛选后的内置 GitHub 操作](docs/screenshots/actions.zh-CN.png)
 
 ### 可视化工作流编辑器
 

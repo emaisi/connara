@@ -8,7 +8,7 @@ A self-hosted API integration platform for connecting external services and inte
 
 Connara combines a system/action catalog with connection and authentication management. The backend is written in Go, and the React console is embedded in the application binary: a basic installation runs **one Connara process, PostgreSQL, and Redis**.
 
-![Connara administration console — integration overview](docs/screenshots/overview.en.png)
+![Connara visual workflow editor](docs/screenshots/overview.en.png)
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
@@ -64,32 +64,35 @@ OAuth 1.0a, provider-specific HMAC, SAML assertion creation and validation, and 
 
 ## Console navigation
 
-The sidebar has four main entries. Related pages appear in collapsible groups, with the active page's group opened automatically.
+The sidebar keeps the six daily-use areas visible and places lower-frequency administration pages under **More**.
 
 | Main entry | Pages |
 | --- | --- |
 | Overview | Integration totals, recent activity, and setup shortcuts |
-| Integrations | System Catalog, Authentication Center, Integration Configurations, Connected Accounts |
-| Calls and Runs | API Actions and the Operations Center |
-| More Features | Sync Tasks, Workflows, Webhooks, Access Control, Audit Logs, Team Management, and Platform Settings |
+| Systems | Built-in and user-created systems, groups, authentication-template associations, and connection status |
+| API | Reusable API definitions, system/status filters, and test entry points |
+| Integrations | System, authentication instance, base URL, and connected-account configuration |
+| Authentication Center | Authentication templates, system-bound instances, and accounts |
+| Run history | API, sync, workflow, authentication, and Webhook execution records |
+| More | Sync Tasks, Workflows, Webhooks, Access Control, Audit Logs, Team Management, and Platform Settings |
 
 **Quick Start** and **Developer Docs** remain accessible at the bottom of the sidebar. Navigation is shipped with the frontend; there is no separate menu SQL to import.
 
 ## Screenshots
 
-The catalog, authentication, API-action, and navigation screenshots below were captured from the running console on **2026-09-17**, before the project was renamed from APIHub to Connara. The current workflow editor screenshots were captured from the embedded console on **2026-10-04**. The images retain the APIHub header while binary and environment-variable compatibility names remain in use. No credentials or private business data are shown.
+All screenshots in this README were refreshed from the current embedded console on **2026-10-04**. Catalog and API pages are filtered to the built-in GitHub records, and Authentication Center shows built-in templates, so user-created systems, internal addresses, credentials, and run history are excluded. The application still uses the APIHub compatibility name in its header and binaries.
 
 ### System catalog
 
-![System catalog with the built-in GitHub and JSONPlaceholder systems](docs/screenshots/systems.en.png)
+![Current system catalog filtered to the built-in GitHub system](docs/screenshots/systems.en.png)
 
 ### Authentication center
 
-![Authentication center showing directly executable methods and extension templates](docs/screenshots/authentication.en.png)
+![Current authentication center showing built-in executable templates](docs/screenshots/authentication.en.png)
 
 ### API actions
 
-![API action definitions and the five-step integration workflow](docs/screenshots/actions.en.png)
+![Current API definitions filtered to the built-in GitHub actions](docs/screenshots/actions.en.png)
 
 ### Visual workflow editor
 
