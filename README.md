@@ -110,7 +110,7 @@ The editor keeps creation and view controls inside the canvas, supports keyboard
 <details>
 <summary>Mobile navigation</summary>
 
-<img src="docs/screenshots/mobile-navigation.en.png" alt="Connara mobile navigation with the Integrations group expanded" width="300" />
+<img src="docs/screenshots/mobile-navigation.en.png" alt="Current Connara mobile navigation" width="300" />
 
 </details>
 

@@ -110,7 +110,7 @@ OAuth 1.0a、服务商专用 HMAC、SAML 断言生成与验证、Kerberos/NTLM �
 <details>
 <summary>查看手机端导航</summary>
 
-<img src="docs/screenshots/mobile-navigation.zh-CN.png" alt="Connara 手机端导航，集成管理分组已展开" width="300" />
+<img src="docs/screenshots/mobile-navigation.zh-CN.png" alt="当前 Connara 手机端导航" width="300" />
 
 </details>
 
