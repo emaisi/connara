@@ -1,4 +1,7 @@
 {
+  "正在恢复登录状态…": "Restoring your session…",
+  "折叠侧边栏": "Collapse sidebar",
+  "展开侧边栏": "Expand sidebar",
   "，成功后自动应用配置的请求注入规则。": ", automatically apply the configured request injection rules upon success.",
   "”吗？": "”?",
   "”吗？此操作无法撤销。": "”Are you sure? This action cannot be undone.",

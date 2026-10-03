@@ -20,6 +20,15 @@ type Reference struct {
 // one step, bound integrations/connections and every referenced action to be
 // resolvable by key through the lookup callback.
 func ValidateDefinition(definition Definition, requireDeploy bool, actionExists func(key string) bool) error {
+	if definition.SchemaVersion == 2 {
+		return validateV2Definition(definition, requireDeploy, actionExists)
+	}
+	if definition.SchemaVersion != 0 && definition.SchemaVersion != 1 {
+		return fmt.Errorf("unsupported graph schemaVersion %d", definition.SchemaVersion)
+	}
+	if len(definition.InputSchema) > 0 || len(definition.Variables) > 0 {
+		return fmt.Errorf("inputSchema and variables require graph schemaVersion 2")
+	}
 	if len(definition.Steps) > MaxSteps {
 		return fmt.Errorf("workflow exceeds %d steps", MaxSteps)
 	}
@@ -33,6 +42,9 @@ func ValidateDefinition(definition Definition, requireDeploy bool, actionExists 
 	}
 	identifiers := map[string]bool{}
 	for index, step := range definition.Steps {
+		if step.Type != "" || len(step.Scope) > 0 || len(step.Assign) > 0 || len(step.Source) > 0 || len(step.Operations) > 0 || len(step.Branches) > 0 || step.Language != "" || step.RuntimeProfile != "" || step.Code != "" || len(step.InputSchema) > 0 || len(step.OutputSchema) > 0 {
+			return fmt.Errorf("step %q uses fields that require graph schemaVersion 2", step.ID)
+		}
 		if !validStepID(step.ID) {
 			return fmt.Errorf("step %d has invalid id %q: use 1-64 letters, digits, - or _", index, step.ID)
 		}
@@ -85,7 +97,11 @@ func ValidateDefinition(definition Definition, requireDeploy bool, actionExists 
 			}
 		}
 		closures[step.ID] = closure
-		for _, reference := range collectStepReferences(step) {
+		references, err := collectStepReferences(step)
+		if err != nil {
+			return fmt.Errorf("step %q input: %w", step.ID, err)
+		}
+		for _, reference := range references {
 			if reference.Optional {
 				return fmt.Errorf("step %q uses optional reference {{?%s}}; only the workflow output mapping may omit missing paths", step.ID, reference.Path)
 			}
@@ -234,14 +250,17 @@ func orderGraph(identifiers []string, dependencies [][]string) ([]int, error) {
 
 // collectStepReferences gathers references from a step's input template and
 // runIf path.
-func collectStepReferences(step Step) []Reference {
-	references, _ := CollectReferences(step.Input)
+func collectStepReferences(step Step) ([]Reference, error) {
+	references, err := CollectReferences(step.Input)
+	if err != nil {
+		return nil, err
+	}
 	if step.RunIf != nil && step.RunIf.Path != "" {
 		references = append(references, Reference{Path: step.RunIf.Path, Alias: aliasOf(step.RunIf.Path)})
 	}
 	// runIf groups embed further leaf paths.
 	references = append(references, conditionReferences(step.RunIf)...)
-	return references
+	return references, nil
 }
 
 func conditionReferences(condition *Condition) []Reference {

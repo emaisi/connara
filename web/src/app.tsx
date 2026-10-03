@@ -23,6 +23,13 @@ const GettingStartedPage = lazy(() =>
 );
 const SyncTasksPage = lazy(() => import("./pages/sync-tasks").then((module) => ({ default: module.SyncTasksPage })));
 const WorkflowsPage = lazy(() => import("./pages/workflows").then((module) => ({ default: module.WorkflowsPage })));
+const WorkflowSession = lazy(() =>
+  import("./pages/workflow-editor").then((module) => ({ default: module.WorkflowSession })),
+);
+const WorkflowHistory = lazy(() =>
+  import("./pages/workflow-run").then((module) => ({ default: module.WorkflowHistory })),
+);
+const WorkflowRun = lazy(() => import("./pages/workflow-run").then((module) => ({ default: module.WorkflowRun })));
 const OperationsPage = lazy(() =>
   import("./pages/demo-operations").then((module) => ({ default: module.OperationsPage })),
 );
@@ -62,6 +69,12 @@ export function App() {
               <Route path="actions" element={<DemoActionsPage />} />
               <Route path="sync" element={<SyncTasksPage />} />
               <Route path="workflows" element={<WorkflowsPage />} />
+              <Route path="workflows/:id" element={<WorkflowSession />}>
+                <Route index element={<></>} />
+                <Route path="history" element={<WorkflowHistory />} />
+                <Route path="runs/:runId" element={<WorkflowRun />} />
+              </Route>
+              <Route path="workflow-runs/:runId" element={<WorkflowRun />} />
               <Route path="functions" element={<Navigate to="/sync" replace />} />
               <Route path="webhooks" element={<WebhooksPage />} />
               <Route path="access" element={<DemoAccessPage />} />

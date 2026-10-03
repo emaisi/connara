@@ -276,6 +276,8 @@ type Workflow struct {
 	Version          int64           `json:"version"`
 	CreatedAt        time.Time       `json:"createdAt"`
 	UpdatedAt        time.Time       `json:"updatedAt"`
+	EditorLayout json.RawMessage `json:"editorLayout"`
+	LayoutVersion int64 `json:"layoutVersion"`
 }
 
 type WebhookEndpoint struct {

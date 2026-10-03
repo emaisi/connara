@@ -4,12 +4,28 @@ import { useResourcePages, PageControls } from "../pagination";
 import { ArrowRight, Plus } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router";
-import { DEFAULT_CUSTOM_SYSTEM_DESCRIPTION, systemDescriptionForDisplay, useDemo, type DemoSystem } from "../demo";
+import {
+  DEFAULT_CUSTOM_SYSTEM_DESCRIPTION,
+  systemDescriptionForDisplay,
+  statusLabel,
+  useDemo,
+  type DemoSystem,
+} from "../demo";
 import { useLanguage } from "../i18n";
 import { Badge, Button, Card, Field, Modal, MutationForm, PageHeader, fieldClass } from "../ui";
 import { api } from "../api";
 
-import { authInstancesFor, availableAuthMethods, SearchBox, Tabs, Logo, MiniStat, ListRow } from "./core-shared";
+import {
+  authInstancesFor,
+  authInstanceName,
+  authTemplateName,
+  availableAuthMethods,
+  SearchBox,
+  Tabs,
+  Logo,
+  MiniStat,
+  ListRow,
+} from "./core-shared";
 export function DemoProvidersPage() {
   return (
     <div className="grid gap-6">
@@ -104,9 +120,26 @@ function SystemDirectoryPage() {
   const [selected, setSelected] = useState<DemoSystem | null>(null);
   const [detailTab, setDetailTab] = useState("API");
   const [systemApis, setSystemApis] = useState<any[]>([]);
+  const [apiQuery, setApiQuery] = useState("");
+  const [apiStatus, setApiStatus] = useState("");
+  const [apisLoading, setApisLoading] = useState(false);
+  const [apisError, setApisError] = useState(false);
+  const filteredApis = systemApis.filter(
+    (row) =>
+      (!apiStatus || row.status === apiStatus) &&
+      [row.name, row.description, row.actionKey, row.relativePath, row.httpMethod].some((value) =>
+        String(value ?? "")
+          .toLowerCase()
+          .includes(apiQuery.trim().toLowerCase()),
+      ),
+  );
   useEffect(() => {
     setDetailTab("API");
     setSystemApis([]);
+    setApiQuery("");
+    setApiStatus("");
+    setApisError(false);
+    setApisLoading(Boolean(selected));
     if (!selected) return;
     let cancelled = false;
     void api
@@ -114,7 +147,15 @@ function SystemDirectoryPage() {
       .then((rows) => {
         if (!cancelled) setSystemApis(rows.filter((row) => row.systemKey === selected.service));
       })
-      .catch((error) => demo.notify(error));
+      .catch((error) => {
+        if (!cancelled) {
+          setApisError(true);
+          demo.notify(error);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setApisLoading(false);
+      });
     return () => {
       cancelled = true;
     };
@@ -303,6 +344,8 @@ function SystemDirectoryPage() {
       <Modal
         open={Boolean(selected)}
         onOpenChange={(open) => !open && setSelected(null)}
+        className="w-[min(94vw,56rem)]"
+        unsavedChanges={authSelectionChanged || Boolean(selected && selectedGroupId !== (selected.groupId ?? ""))}
         title={selected?.name ?? "系统"}
         description={selected?.description ?? ""}
       >
@@ -316,44 +359,128 @@ function SystemDirectoryPage() {
             <Tabs value={detailTab} onChange={setDetailTab} items={["API", "集成", "系统设置"]} />
             {detailTab === "API" && (
               <div className="grid gap-3">
-                <Button asChild write className="w-fit">
-                  <Link to={`/actions?new=1&system=${encodeURIComponent(selected.service)}`}>添加 API</Link>
-                </Button>
-                {systemApis.map((row) => (
-                  <Link
-                    key={row.id}
-                    className="flex flex-wrap gap-2 rounded-lg border p-3 text-sm"
-                    to={`/actions?api=${encodeURIComponent(row.id)}&system=${encodeURIComponent(selected.service)}`}
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="min-w-0 flex-1 basis-48">
+                    <SearchBox value={apiQuery} onChange={setApiQuery} placeholder="搜索 API 名称、功能或路径" />
+                  </div>
+                  <select
+                    aria-label="API 定义状态"
+                    className={`${fieldClass} !w-28 shrink-0`}
+                    value={apiStatus}
+                    onChange={(event) => setApiStatus(event.target.value)}
                   >
-                    <Badge>{row.httpMethod}</Badge>
-                    <span>{row.name}</span>
-                    <code className="break-all">{row.relativePath}</code>
-                  </Link>
-                ))}
-                {!systemApis.length && (
-                  <p className="text-sm text-[var(--muted-text)]">暂无 API 定义，可以先添加接口再配置访问环境。</p>
-                )}
+                    <option value="">全部状态</option>
+                    <option value="active">已启用</option>
+                    <option value="draft">草稿</option>
+                    <option value="disabled">停用</option>
+                  </select>
+                  <Button asChild write>
+                    <Link to={`/actions?new=1&system=${encodeURIComponent(selected.service)}`}>添加 API</Link>
+                  </Button>
+                </div>
+                <div className="overflow-hidden rounded-lg border border-[var(--border)]">
+                  <div
+                    aria-hidden="true"
+                    className="hidden grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_minmax(0,1fr)] gap-4 bg-[var(--muted)] px-3 py-2 text-xs text-[var(--muted-text)] md:grid"
+                  >
+                    <span>API 功能</span>
+                    <span>功能说明</span>
+                    <span>接口</span>
+                  </div>
+                  {filteredApis.map((row) => (
+                    <Link
+                      key={row.id}
+                      className="grid gap-1 border-t border-[var(--border)] px-3 py-2.5 text-sm first:border-t-0 hover:bg-[var(--muted)] focus-visible:outline-2 focus-visible:outline-blue-500 focus-visible:-outline-offset-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_minmax(0,1fr)] md:items-center md:gap-4"
+                      to={`/actions?api=${encodeURIComponent(row.id)}&system=${encodeURIComponent(selected.service)}`}
+                    >
+                      <span className="min-w-0 break-words font-semibold">{row.name || row.actionKey}</span>
+                      <span className="min-w-0 break-words text-[var(--muted-text)]">
+                        {row.description?.trim() || "暂无功能说明"}
+                      </span>
+                      <code className="hidden min-w-0 break-all text-xs text-[var(--muted-text)] md:block">
+                        {row.httpMethod} {row.relativePath}
+                      </code>
+                    </Link>
+                  ))}
+                  {(apisLoading || apisError || !filteredApis.length) && (
+                    <p role={apisError ? "alert" : "status"} className="p-3 text-sm text-[var(--muted-text)]">
+                      {apisLoading
+                        ? "正在加载 API…"
+                        : apisError
+                          ? "API 加载失败，请关闭后重试。"
+                          : systemApis.length
+                            ? "没有符合筛选条件的 API。"
+                            : "暂无 API 定义，可以先添加接口再配置访问环境。"}
+                    </p>
+                  )}
+                </div>
               </div>
             )}
             {detailTab === "集成" && (
               <div className="grid gap-3">
-                {demo.integrations
-                  .filter((i) => i.provider === selected.service)
-                  .map((i) => (
-                    <Link
-                      key={i.id}
-                      className="grid gap-1 rounded-lg border p-3 text-sm"
-                      to={`/integrations?integration=${encodeURIComponent(i.id)}`}
-                    >
-                      <strong>
-                        {i.displayName} · {i.name}
-                      </strong>
-                      <span className="break-all">{i.baseUrl}</span>
-                    </Link>
-                  ))}
                 <Button asChild write className="w-fit">
                   <Link to={`/integrations?new=1&system=${encodeURIComponent(selected.service)}`}>创建集成配置</Link>
                 </Button>
+                <div className="divide-y divide-[var(--border)] overflow-hidden rounded-lg border border-[var(--border)]">
+                  {demo.integrations
+                    .filter((i) => i.provider === selected.service)
+                    .map((i) => {
+                      const instance = demo.authInstances.find((item) => item.id === i.authInstanceId);
+                      const accounts = demo.connections.filter((item) => item.integration === i.name);
+                      const activeAccounts = accounts.filter((item) => item.status === "active").length;
+                      const environment = i.settings?.environment;
+                      return (
+                        <Link
+                          key={i.id}
+                          className="grid gap-2 px-3 py-3 text-sm hover:bg-[var(--muted)] focus-visible:outline-2 focus-visible:outline-blue-500 focus-visible:-outline-offset-2"
+                          to={`/integrations?integration=${encodeURIComponent(i.id)}`}
+                        >
+                          <div className="flex flex-wrap items-center gap-2">
+                            <strong className="min-w-0 break-all">{i.name}</strong>
+                            <Badge>
+                              {environment === "production"
+                                ? "生产"
+                                : environment === "test"
+                                  ? "测试"
+                                  : environment === "custom"
+                                    ? "自定义环境"
+                                    : String(environment || "自定义环境")}
+                            </Badge>
+                            <Badge
+                              tone={i.status === "ready" ? "success" : i.status === "draft" ? "warning" : "neutral"}
+                            >
+                              {statusLabel(i.status)}
+                            </Badge>
+                          </div>
+                          <div className="grid min-w-0 gap-x-4 gap-y-1 text-xs text-[var(--muted-text)] md:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)_auto]">
+                            <span className="min-w-0 break-all">
+                              <span className="font-medium">地址：</span>
+                              {i.baseUrl || "未配置"}
+                            </span>
+                            <span className="min-w-0 break-words">
+                              <span className="font-medium">认证：</span>
+                              {i.authInstanceId ? authInstanceName(i.authInstanceId, demo.authInstances) : "未绑定"}
+                              {instance && (
+                                <>
+                                  {" "}
+                                  · {authTemplateName(instance.templateId, demo.authSchemes)} ·{" "}
+                                  {statusLabel(instance.status)}
+                                </>
+                              )}
+                            </span>
+                            <span>
+                              账号：{accounts.length} 个 · {activeAccounts} 个正常
+                            </span>
+                          </div>
+                        </Link>
+                      );
+                    })}
+                  {!demo.integrations.some((i) => i.provider === selected.service) && (
+                    <p className="p-3 text-sm text-[var(--muted-text)]">
+                      暂无集成配置。创建集成后，可在这里查看访问地址、环境、认证实例和账号情况。
+                    </p>
+                  )}
+                </div>
               </div>
             )}
             {detailTab === "系统设置" && (

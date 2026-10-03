@@ -9,9 +9,12 @@ import {
   KeyRound,
   LifeBuoy,
   LogOut,
+  LoaderCircle,
   Menu,
   Moon,
   Network,
+  PanelLeftClose,
+  PanelLeftOpen,
   RefreshCw,
   SearchCode,
   Settings2,
@@ -91,7 +94,9 @@ export function Shell() {
   const [signingIn, setSigningIn] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [desktop, setDesktop] = useState(() => matchMedia("(min-width: 1024px)").matches);
+  const collapsed = desktop && sidebarCollapsed;
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const accountMenuRef = useRef<HTMLDivElement>(null);
@@ -172,6 +177,17 @@ export function Shell() {
 
   const currentTitle = t(pageTitles[location.pathname] ?? demo.platformName);
   const currentSection = t(activeGroup?.label ?? "工作区");
+
+  if (!demo.authenticated && demo.loading) {
+    return (
+      <main className="grid min-h-svh place-items-center bg-[var(--background)] text-[var(--text)]">
+        <p role="status" className="flex items-center gap-2 text-sm text-[var(--muted-text)]">
+          <LoaderCircle aria-hidden="true" className="size-4 animate-spin" />
+          {t("正在恢复登录状态…")}
+        </p>
+      </main>
+    );
+  }
 
   if (!demo.authenticated) {
     return (
@@ -257,28 +273,46 @@ export function Shell() {
         />
       )}
       <aside
+        id="main-sidebar"
         aria-hidden={!desktop && !mobileOpen}
         aria-label="主导航"
         aria-modal={!desktop && mobileOpen ? true : undefined}
         inert={!desktop && !mobileOpen}
         role={!desktop ? "dialog" : undefined}
         className={cn(
-          "fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-[var(--border)] bg-[var(--sidebar)] transition-transform lg:translate-x-0",
+          "fixed inset-y-0 left-0 z-40 flex flex-col border-r border-[var(--border)] bg-[var(--sidebar)] transition-transform lg:translate-x-0",
+          collapsed ? "w-20" : "w-64",
           mobileOpen ? "translate-x-0" : "-translate-x-full",
         )}
       >
-        <div className="flex h-16 items-center justify-between border-b border-[var(--border)] px-5">
-          <div className="flex items-center gap-3">
-            <span className="grid size-9 place-items-center rounded-xl bg-gradient-to-br from-blue-600 to-cyan-500 text-white shadow-md shadow-blue-500/20">
+        <div
+          className={cn(
+            "flex h-16 shrink-0 items-center border-b border-[var(--border)]",
+            collapsed ? "justify-center" : "justify-between px-3",
+          )}
+        >
+          <div className={cn("flex min-w-0 items-center gap-3", collapsed && "hidden")}>
+            <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-gradient-to-br from-blue-600 to-cyan-500 text-white shadow-md shadow-blue-500/20">
               <Network className="size-5" />
             </span>
-            <div>
-              <div className="font-extrabold tracking-tight">{demo.platformName}</div>
+            <div className="min-w-0">
+              <div className="truncate font-extrabold tracking-tight">{demo.platformName}</div>
               <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-[var(--muted-text)]">
                 集成运行平台
               </div>
             </div>
           </div>
+          <Button
+            variant="ghost"
+            className="hidden size-8 shrink-0 p-0 lg:inline-flex"
+            aria-label={t(collapsed ? "展开侧边栏" : "折叠侧边栏")}
+            title={t(collapsed ? "展开侧边栏" : "折叠侧边栏")}
+            aria-expanded={!collapsed}
+            aria-controls="main-sidebar"
+            onClick={() => setSidebarCollapsed((value) => !value)}
+          >
+            {collapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
+          </Button>
           <Button
             ref={closeButtonRef}
             variant="ghost"
@@ -296,6 +330,7 @@ export function Shell() {
                 <div key={entry.id}>
                   <button
                     type="button"
+                    title={collapsed ? t(entry.label) : undefined}
                     aria-expanded={expandedGroup === entry.id}
                     aria-controls={`navigation-${entry.id}`}
                     onClick={() => setExpandedGroup((current) => (current === entry.id ? null : entry.id))}
@@ -307,21 +342,23 @@ export function Shell() {
                     )}
                   >
                     <entry.icon className="size-[18px] shrink-0" />
-                    <span className="truncate">{t(entry.label)}</span>
+                    <span className={collapsed ? "sr-only" : "truncate"}>{t(entry.label)}</span>
                     <ChevronRight
                       aria-hidden="true"
                       className={cn(
                         "ml-auto size-4 shrink-0 transition-transform",
+                        collapsed && "hidden",
                         expandedGroup === entry.id && "rotate-90",
                       )}
                     />
                   </button>
                   <div id={`navigation-${entry.id}`} hidden={expandedGroup !== entry.id}>
-                    <div className="my-1 ml-5 grid gap-1 border-l border-[var(--border)] pl-3">
+                    <div className={cn("my-1 grid gap-1", !collapsed && "ml-5 border-l border-[var(--border)] pl-3")}>
                       {entry.items.map((item) => (
                         <NavLink
                           key={item.path}
                           to={item.path}
+                          title={collapsed ? t(item.label) : undefined}
                           onClick={() => setMobileOpen(false)}
                           className={({ isActive }) =>
                             cn(
@@ -332,7 +369,8 @@ export function Shell() {
                             )
                           }
                         >
-                          {t(item.label)}
+                          {collapsed && <item.icon className="size-[18px] shrink-0" />}
+                          <span className={collapsed ? "sr-only" : undefined}>{t(item.label)}</span>
                         </NavLink>
                       ))}
                     </div>
@@ -342,6 +380,7 @@ export function Shell() {
                 <NavLink
                   key={entry.path}
                   to={entry.path}
+                  title={collapsed ? t(entry.label) : undefined}
                   end={entry.path === "/"}
                   onClick={() => setMobileOpen(false)}
                   className={({ isActive }) =>
@@ -354,7 +393,7 @@ export function Shell() {
                   }
                 >
                   <entry.icon className="size-[18px] shrink-0" />
-                  <span className="truncate">{t(entry.label)}</span>
+                  <span className={collapsed ? "sr-only" : "truncate"}>{t(entry.label)}</span>
                 </NavLink>
               ),
             )}
@@ -365,6 +404,7 @@ export function Shell() {
             <NavLink
               key={item.path}
               to={item.path}
+              title={collapsed ? t(item.label) : undefined}
               onClick={() => setMobileOpen(false)}
               className={({ isActive }) =>
                 cn(
@@ -376,7 +416,7 @@ export function Shell() {
               }
             >
               <item.icon className="size-4 shrink-0" />
-              {t(item.label)}
+              <span className={collapsed ? "sr-only" : undefined}>{t(item.label)}</span>
             </NavLink>
           ))}
           <a
@@ -389,7 +429,7 @@ export function Shell() {
             className="flex min-h-10 items-center gap-3 rounded-xl px-3 py-2 text-xs text-[var(--muted-text)] transition hover:bg-[var(--muted)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-blue-500"
           >
             <ExternalLink aria-hidden="true" className="size-4 shrink-0" />
-            GitHub
+            <span className={collapsed ? "sr-only" : undefined}>GitHub</span>
           </a>
         </nav>
         <div ref={accountMenuRef} className="relative border-t border-[var(--border)] p-3">
@@ -397,7 +437,10 @@ export function Shell() {
             <div
               role="menu"
               aria-label="用户菜单"
-              className="absolute bottom-full left-3 right-3 mb-2 overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-2 shadow-xl"
+              className={cn(
+                "absolute bottom-full left-3 mb-2 overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-2 shadow-xl",
+                collapsed ? "w-64" : "right-3",
+              )}
             >
               <div className="border-b border-[var(--border)] px-3 py-2.5">
                 <p className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--muted-text)]">当前账号</p>
@@ -435,21 +478,25 @@ export function Shell() {
             aria-label="打开用户菜单"
             className="flex w-full items-center gap-3 rounded-xl p-2.5 text-left transition hover:bg-[var(--muted)]"
           >
-            <span className="grid size-9 place-items-center rounded-full bg-gradient-to-br from-blue-500 to-violet-500 text-xs font-bold text-white">
+            <span className="grid size-9 shrink-0 place-items-center rounded-full bg-gradient-to-br from-blue-500 to-violet-500 text-xs font-bold text-white">
               {(demo.user?.displayName || demo.user?.email || "A").slice(0, 1).toUpperCase()}
             </span>
-            <div className="min-w-0 flex-1">
+            <div className={cn("min-w-0 flex-1", collapsed && "hidden")}>
               <p className="truncate text-xs font-bold">{demo.user?.displayName || t("管理员")}</p>
               <p className="truncate text-[10px] text-[var(--muted-text)]">{demo.user?.email}</p>
             </div>
             <ChevronRight
-              className={cn("size-4 text-[var(--muted-text)] transition-transform", accountOpen && "-rotate-90")}
+              className={cn(
+                "size-4 text-[var(--muted-text)] transition-transform",
+                collapsed && "hidden",
+                accountOpen && "-rotate-90",
+              )}
             />
           </button>
         </div>
       </aside>
 
-      <div className="lg:pl-64" inert={!desktop && mobileOpen}>
+      <div className={collapsed ? "lg:pl-20" : "lg:pl-64"} inert={!desktop && mobileOpen}>
         <header className="sticky top-0 z-20 flex h-16 items-center border-b border-[var(--border)] bg-[color-mix(in_srgb,var(--background)_88%,transparent)] px-4 backdrop-blur-xl sm:px-7">
           <Button
             ref={menuButtonRef}
@@ -493,7 +540,13 @@ export function Shell() {
             </Button>
           </div>
         </header>
-        <main className="mx-auto w-full max-w-[1440px] p-4 sm:p-7 lg:p-8">
+        <main
+          className={
+            /^\/workflows\/[^/]+$/.test(location.pathname)
+              ? "w-full p-3"
+              : "mx-auto w-full max-w-[1440px] p-4 sm:p-7 lg:p-8"
+          }
+        >
           {demo.user?.role === "viewer" && (
             <p role="status" className="mb-4 text-sm text-amber-700">
               当前为只读角色，可以浏览数据；保存、运行和管理操作需要更高权限。

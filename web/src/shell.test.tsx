@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router";
 import { DemoProvider } from "./demo";
@@ -11,6 +11,48 @@ afterEach(() => {
 });
 
 describe("mobile navigation", () => {
+  it("waits for session restoration without flashing the login form", async () => {
+    vi.stubGlobal("localStorage", { getItem: () => null, setItem: vi.fn() });
+    let restore!: (response: Response) => void;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        if (String(input) === "/api/auth/session")
+          return new Promise<Response>((resolve) => {
+            restore = resolve;
+          });
+        const value = String(input) === "/api/lookups" ? { systems: [], connections: [] } : [];
+        return Promise.resolve(
+          new Response(JSON.stringify(value), { headers: { "Content-Type": "application/json" } }),
+        );
+      }),
+    );
+    vi.stubGlobal("matchMedia", () => ({
+      matches: true,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+    }));
+    render(
+      <MemoryRouter initialEntries={["/workflows"]}>
+        <DemoProvider>
+          <Shell />
+        </DemoProvider>
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("正在恢复登录状态");
+    expect(screen.queryByLabelText("邮箱账号")).not.toBeInTheDocument();
+    await act(async () =>
+      restore(
+        new Response(JSON.stringify({ userId: "u1", email: "test@example.com", role: "owner" }), {
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+    expect(await screen.findByRole("navigation", { name: "功能导航" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "工作流" })).toHaveAttribute("aria-current", "page");
+    expect(screen.queryByLabelText("邮箱账号")).not.toBeInTheDocument();
+  });
+
   it("keeps the closed drawer out of the focus order and restores focus after closing", async () => {
     vi.stubGlobal(
       "fetch",
@@ -121,7 +163,19 @@ describe("mobile navigation", () => {
       </MemoryRouter>,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "打开用户菜单" }));
+    const collapse = await screen.findByRole("button", { name: "折叠侧边栏" });
+    expect(collapse).toHaveAttribute("aria-expanded", "true");
+    expect(document.querySelector("aside")).toHaveClass("w-64");
+    fireEvent.click(collapse);
+    expect(document.querySelector("aside")).toHaveClass("w-20");
+    expect(screen.getByRole("link", { name: "系统" })).toHaveAttribute("title", "系统");
+    fireEvent.click(screen.getByRole("button", { name: "更多功能" }));
+    expect(screen.getByRole("link", { name: "工作流" })).toHaveAttribute("href", "/workflows");
+    expect(screen.getByRole("link", { name: "开发者文档" })).toHaveAttribute("title", "开发者文档");
+    fireEvent.click(screen.getByRole("button", { name: "展开侧边栏" }));
+    expect(document.querySelector("aside")).toHaveClass("w-64");
+    fireEvent.click(screen.getByRole("button", { name: "折叠侧边栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开用户菜单" }));
 
     expect(screen.getByRole("menu", { name: "用户菜单" })).toBeInTheDocument();
     expect(screen.getByText("当前账号")).toBeInTheDocument();

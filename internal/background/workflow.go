@@ -54,6 +54,16 @@ func (d storeDeps) ResolveAuth(ctx context.Context, connection model.Connection)
 	return resolved.RequestAuth(), nil
 }
 
+func (d storeDeps) AuthorizeRun(ctx context.Context, principal workflow.Principal) error {
+	if principal.Kind != "runtime_token" {
+		return nil
+	}
+	if _, err := d.store.RuntimeTokenByID(ctx, principal.TokenID); err != nil {
+		return errors.New("runtime token is no longer valid")
+	}
+	return nil
+}
+
 // AuthorizeStep re-reads the runtime token on every step (deny-wins) so
 // revocation or expiry stops the remaining steps. Control-plane principals
 // (manual admin triggers, scheduler) run under their explicit identity.
@@ -77,9 +87,10 @@ func (d storeDeps) AuthorizeStep(ctx context.Context, principal workflow.Princip
 // NewWorkflowRunner wires the shared engine for both execution paths.
 func NewWorkflowRunner(database *store.Store, auth *authn.Service, actionExecutor *executor.Executor, providerCatalog *catalog.Catalog) *workflow.Runner {
 	return &workflow.Runner{
-		Deps:     storeDeps{store: database, auth: auth},
-		Executor: actionExecutor,
-		Catalog:  providerCatalog,
+		Deps:       storeDeps{store: database, auth: auth},
+		CodeRunner: database.WorkflowCodeRunner(),
+		Executor:   actionExecutor,
+		Catalog:    providerCatalog,
 	}
 }
 
@@ -123,28 +134,18 @@ func (s *Service) RunWorkflowJob(ctx context.Context, job model.Job) error {
 	result, runErr := runner.Run(ctx, snapshot, workflow.Options{
 		Principal: principal,
 		Attempt:   job.Attempt,
+		OnStepStart: func(outcome workflow.StepOutcome) {
+			if err := s.store.AddOperationEvent(ctx, operation.ID, "info", "workflow.step.started", store.MarshalJSON(workflow.StepEvent(outcome, job.Attempt, true))); err != nil {
+				s.logger.ErrorContext(ctx, "record workflow event", "operation_id", operation.ID)
+			}
+		},
 		OnStep: func(outcome workflow.StepOutcome) {
-			attributes := map[string]any{
-				"attempt":    job.Attempt,
-				"stepId":     outcome.StepID,
-				"actionKey":  outcome.ActionKey,
-				"status":     outcome.Status,
-				"httpStatus": outcome.ProviderStatus,
-			}
-			if outcome.Title != "" {
-				attributes["title"] = outcome.Title
-			}
-			if outcome.Error != "" {
-				attributes["error"] = outcome.Error
-			}
-			if outcome.Output != nil {
-				attributes["responsePreview"] = json.RawMessage(safejson.Marshal(outcome.Output, 4<<10))
-			}
-			if err := s.store.AddOperationEvent(ctx, operation.ID, levelForStep(outcome.Status), messageForStep(outcome), store.MarshalJSON(attributes)); err != nil {
-				s.logger.ErrorContext(ctx, "record workflow step event", "operation_id", operation.ID, "step", outcome.StepID, "error", err)
+			if err := s.store.AddOperationEvent(ctx, operation.ID, levelForStep(outcome.Status), "workflow.step.finished", store.MarshalJSON(workflow.StepEvent(outcome, job.Attempt, false))); err != nil {
+				s.logger.ErrorContext(ctx, "record workflow event", "operation_id", operation.ID)
 			}
 		},
 	})
+	_ = s.store.AddOperationEvent(ctx, operation.ID, "info", "workflow.run.finished", store.MarshalJSON(workflow.RunEvent(result, runErr)))
 	if runErr == nil {
 		plain, err := json.Marshal(result.Final)
 		if err != nil {

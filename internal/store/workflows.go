@@ -37,7 +37,7 @@ func (s *Store) ListWorkflows(ctx context.Context) ([]model.Workflow, error) {
 	rows, err := s.database(ctx).Query(ctx, `
 		SELECT id::text, workflow_key, name, description, status, graph, schedule_type,
 		       COALESCE(cron_expression, ''), schedule_timezone, next_run_at,
-		       retry_policy, input, version, created_at, updated_at
+		       retry_policy, input, version, editor_layout, layout_version, created_at, updated_at
 		FROM workflows
 		WHERE workspace_id = $1 AND deleted_at IS NULL
 		ORDER BY updated_at DESC, id DESC`, s.workspaceID)
@@ -60,7 +60,7 @@ func (s *Store) Workflow(ctx context.Context, idOrKey string) (model.Workflow, e
 	item, err := scanWorkflow(s.database(ctx).QueryRow(ctx, `
 		SELECT id::text, workflow_key, name, description, status, graph, schedule_type,
 		       COALESCE(cron_expression, ''), schedule_timezone, next_run_at,
-		       retry_policy, input, version, created_at, updated_at
+		       retry_policy, input, version, editor_layout, layout_version, created_at, updated_at
 		FROM workflows
 		WHERE workspace_id = $1 AND deleted_at IS NULL
 		  AND (id::text = $2 OR workflow_key = $2)`, s.workspaceID, idOrKey))
@@ -73,7 +73,7 @@ func scanWorkflow(row rowScanner) (model.Workflow, error) {
 		&item.ID, &item.WorkflowKey, &item.Name, &item.Description, &item.Status,
 		&item.Graph, &item.ScheduleType, &item.CronExpression, &item.ScheduleTimezone,
 		&item.NextRunAt, &item.RetryPolicy, &item.Input,
-		&item.Version, &item.CreatedAt, &item.UpdatedAt,
+		&item.Version, &item.EditorLayout, &item.LayoutVersion, &item.CreatedAt, &item.UpdatedAt,
 	)
 	return item, err
 }
@@ -82,47 +82,16 @@ func scanWorkflow(row rowScanner) (model.Workflow, error) {
 // definitions under an optimistic version lock. Editing a deployed workflow
 // returns it to draft and clears next_run_at so it must be redeployed; the
 // caller cannot set status directly.
-func (s *Store) SaveWorkflow(ctx context.Context, item model.Workflow, expectedVersion int64) (model.Workflow, error) {
-	if item.ID == "" {
-		item.ID = randomID()
-		item.Status = "draft"
-		item.ScheduleTimezone = defaultText(item.ScheduleTimezone, "UTC")
-		if _, err := s.database(ctx).Exec(ctx, `
-			INSERT INTO workflows(
-				id, workspace_id, workflow_key, name, description, status, graph,
-				schedule_type, cron_expression, schedule_timezone, retry_policy, input
-			) VALUES($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), $10, $11, $12)`,
-			item.ID, s.workspaceID, item.WorkflowKey, item.Name, item.Description,
-			item.Status, jsonOrObject(item.Graph), item.ScheduleType, item.CronExpression,
-			item.ScheduleTimezone, jsonOrObject(item.RetryPolicy), jsonOrObject(item.Input)); err != nil {
-			return model.Workflow{}, err
-		}
-		return s.Workflow(ctx, item.ID)
-	}
-	command, err := s.database(ctx).Exec(ctx, `
-		UPDATE workflows SET
-			workflow_key = $3, name = $4, description = $5,
-			graph = $6, schedule_type = $7, cron_expression = NULLIF($8, ''),
-			schedule_timezone = $9, retry_policy = $10, input = $11,
-			status = 'draft', next_run_at = NULL,
-			version = version + 1, updated_at = now()
-		WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
-		  AND version = $12`,
-		s.workspaceID, item.ID, item.WorkflowKey, item.Name, item.Description,
-		jsonOrObject(item.Graph), item.ScheduleType, item.CronExpression,
-		item.ScheduleTimezone, jsonOrObject(item.RetryPolicy), jsonOrObject(item.Input), expectedVersion)
-	if err != nil {
-		return model.Workflow{}, err
-	}
-	if command.RowsAffected() == 0 {
-		return model.Workflow{}, ErrConflict
-	}
-	return s.Workflow(ctx, item.ID)
+func (s *Store) SaveWorkflow(ctx context.Context, item model.Workflow, expectedVersion int64, expectedLayout ...int64) (model.Workflow, error) {
+	return s.saveWorkflowDefinition(ctx, item, expectedVersion, expectedLayout)
 }
 
 // DeployWorkflow marks a workflow deployed with a normalized graph whose
 // integration/connection references have been rewritten to canonical IDs.
 func (s *Store) DeployWorkflow(ctx context.Context, id string, expectedVersion int64, graph json.RawMessage, nextRunAt *time.Time) (model.Workflow, error) {
+	if err := s.workflowFeatures.CheckNew(graph); err != nil {
+		return model.Workflow{}, err
+	}
 	command, err := s.database(ctx).Exec(ctx, `
 		UPDATE workflows SET status = 'deployed', graph = $3, next_run_at = $4,
 		       version = version + 1, updated_at = now()
@@ -203,7 +172,7 @@ func workflowAAD(workspaceID, operationID string) []byte {
 // buildWorkflowSnapshot resolves a stored graph into an encrypted-run-ready
 // snapshot: every step pins action ID/version, integration ID and connection
 // ID and the graph re-validates in deploy mode.
-func (s *Store) buildWorkflowSnapshot(ctx context.Context, db database, item model.Workflow, trigger map[string]any) (workflow.Snapshot, error) {
+func (s *Store) buildWorkflowSnapshot(ctx context.Context, db database, item model.Workflow, trigger map[string]any, triggeredAt time.Time, scheduledFor *time.Time) (workflow.Snapshot, error) {
 	definition, err := workflow.ParseDefinition(item.Graph)
 	if err != nil {
 		return workflow.Snapshot{}, fmt.Errorf("%w: %v", ErrConflict, err)
@@ -225,11 +194,35 @@ func (s *Store) buildWorkflowSnapshot(ctx context.Context, db database, item mod
 	snapshot := workflow.Snapshot{
 		WorkflowID:      item.ID,
 		WorkflowVersion: item.Version,
-		Trigger:         trigger,
-		Output:          definition.Output,
+		WorkflowName:    item.Name, EditorLayout: item.EditorLayout, SchemaVersion: definition.SchemaVersion, InputSchema: definition.InputSchema, Variables: definition.Variables,
+		Trigger: trigger,
+		Output:  definition.Output,
+	}
+	if definition.SchemaVersion == 2 {
+		if err := workflow.ValidateTrigger(definition.InputSchema, trigger); err != nil {
+			return workflow.Snapshot{}, fmt.Errorf("%w: trigger input does not match inputSchema", ErrConflict)
+		}
+		metadata, err := workflow.NewRunMetadata(triggeredAt, scheduledFor, item.ScheduleTimezone)
+		if err != nil {
+			return workflow.Snapshot{}, fmt.Errorf("%w: %v", ErrConflict, err)
+		}
+		snapshot.RunMetadata = metadata
+		variables, err := workflow.InitialVariables(definition, trigger, metadata)
+		if err != nil {
+			return workflow.Snapshot{}, fmt.Errorf("%w: %v", ErrConflict, err)
+		}
+		snapshot.InitialVariables = variables
 	}
 	for _, index := range order {
 		step := definition.Steps[index]
+		pinned := workflow.StepToSnapshot(step)
+		if !step.IsAPI() {
+			if step.Type == "code" {
+				pinned.RunnerBuild = workflow.CodeBuild
+			}
+			snapshot.Steps = append(snapshot.Steps, pinned)
+			continue
+		}
 		action, err := s.actionByKey(ctx, db, step.Action)
 		if err != nil {
 			return workflow.Snapshot{}, fmt.Errorf("%w: step %q action %q is not available: %v", ErrConflict, step.ID, step.Action, err)
@@ -251,13 +244,18 @@ func (s *Store) buildWorkflowSnapshot(ctx context.Context, db database, item mod
 		if err != nil || (integration.AuthFlow != "none" && (!connection.Enabled || connection.Status != "active" || connection.LastVerifiedAt == nil || connection.VerifiedTargetVersion != integration.TargetVersion || connection.VerifiedRevision != connection.Revision)) {
 			return workflow.Snapshot{}, fmt.Errorf("%w: step %q connection is not active", ErrConflict, step.ID)
 		}
-		snapshot.Steps = append(snapshot.Steps, workflow.StepSnapshot{
-			ID: step.ID, Title: step.Title, ActionKey: action.ActionKey,
-			ActionID: action.ID, ActionVersion: action.Version,
-			IntegrationID: integration.ID, ConnectionID: connection.ID,
-			Input: step.Input, DependsOn: step.DependsOn, RunIf: step.RunIf,
-			OnError: step.OnError,
-		})
+		pinned.ActionKey = action.ActionKey
+		pinned.ActionID = action.ID
+		pinned.ActionVersion = action.Version
+		pinned.IntegrationID = integration.ID
+		pinned.ConnectionID = connection.ID
+		pinned.ActionName = action.Name
+		pinned.SystemKey = action.SystemKey
+		pinned.HTTPMethod = action.HTTPMethod
+		pinned.RelativePath = action.RelativePath
+		pinned.IntegrationName = integration.Name
+		pinned.ConnectionName = connection.Name
+		snapshot.Steps = append(snapshot.Steps, pinned)
 	}
 	return snapshot, nil
 }
@@ -340,7 +338,7 @@ func (s *Store) startWorkflowRun(ctx context.Context, input WorkflowTriggerInput
 		item, err := scanWorkflow(tx.QueryRow(ctx, `
 			SELECT id::text, workflow_key, name, description, status, graph, schedule_type,
 			       COALESCE(cron_expression, ''), schedule_timezone, next_run_at,
-			       retry_policy, input, version, created_at, updated_at
+			       retry_policy, input, version, editor_layout, layout_version, created_at, updated_at
 			FROM workflows
 			WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
 			FOR UPDATE`, s.workspaceID, input.Workflow.ID))
@@ -353,12 +351,16 @@ func (s *Store) startWorkflowRun(ctx context.Context, input WorkflowTriggerInput
 		if item.Version != input.Workflow.Version {
 			return fmt.Errorf("%w: workflow changed; retry the request", ErrConflict)
 		}
+		if err := s.workflowFeatures.CheckNew(item.Graph); err != nil {
+			return err
+		}
 		if input.Async {
 			if err := s.checkWorkflowCapacity(ctx, tx, input.MaxActive); err != nil {
 				return err
 			}
 		}
-		built, err := s.buildWorkflowSnapshot(ctx, tx, item, input.Trigger)
+		now := utcNow()
+		built, err := s.buildWorkflowSnapshot(ctx, tx, item, input.Trigger, now, input.ScheduledFor)
 		if err != nil {
 			return err
 		}
@@ -367,7 +369,6 @@ func (s *Store) startWorkflowRun(ctx context.Context, input WorkflowTriggerInput
 		if err != nil {
 			return err
 		}
-		now := utcNow()
 		expiresAt, err := s.OperationExpiresAt(ctx, now)
 		if err != nil {
 			return err
@@ -599,100 +600,123 @@ func (s *Store) MarkWorkflowOperationRunning(ctx context.Context, id string) err
 // previous scheduled run is still active are skipped with their schedule
 // advanced; the returned list reports their keys for structured logging.
 func (s *Store) EnqueueDueWorkflows(ctx context.Context, limit int, codec *secret.Codec) (int, []string, error) {
+	if limit < 1 {
+		limit = 20
+	}
 	enqueued := 0
 	var skipped []string
 	err := s.withTx(ctx, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `
+		tick := utcNow()
+		for {
+			rows, err := tx.Query(ctx, `
 			SELECT id::text FROM workflows
 			WHERE workspace_id = $1 AND status = 'deployed' AND deleted_at IS NULL
-			  AND schedule_type IN ('interval', 'cron') AND next_run_at <= now()
+			  AND schedule_type IN ('interval', 'cron') AND next_run_at <= $3
 			ORDER BY next_run_at, id
-			FOR UPDATE SKIP LOCKED LIMIT $2`, s.workspaceID, limit)
-		if err != nil {
-			return err
-		}
-		ids := []string{}
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				return err
-			}
-			ids = append(ids, id)
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			return err
-		}
-		for _, id := range ids {
-			item, err := scanWorkflow(tx.QueryRow(ctx, `
-				SELECT id::text, workflow_key, name, description, status, graph, schedule_type,
-				       COALESCE(cron_expression, ''), schedule_timezone, next_run_at,
-				       retry_policy, input, version, created_at, updated_at
-				FROM workflows WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
-				s.workspaceID, id))
+			FOR UPDATE SKIP LOCKED LIMIT $2`, s.workspaceID, limit, tick)
 			if err != nil {
 				return err
 			}
-			if item.NextRunAt == nil {
-				continue
-			}
-			planned := *item.NextRunAt
-			next, advanceErr := advanceWorkflowSchedule(item, planned, utcNow())
-			if advanceErr != nil {
-				// A broken schedule must not block the batch or fire every
-				// tick: stop scheduling it and surface the reason.
-				if _, err := tx.Exec(ctx, `
-					UPDATE workflows SET next_run_at = NULL, updated_at = now()
-					WHERE workspace_id = $1 AND id = $2`, s.workspaceID, id); err != nil {
+			ids := []string{}
+			for rows.Next() {
+				var id string
+				if err := rows.Scan(&id); err != nil {
+					rows.Close()
 					return err
 				}
-				skipped = append(skipped, item.WorkflowKey+" (invalid schedule: "+advanceErr.Error()+")")
-				continue
+				ids = append(ids, id)
 			}
-			var active bool
-			if err := tx.QueryRow(ctx, `
+			err = rows.Err()
+			rows.Close()
+			if err != nil {
+				return err
+			}
+			for _, id := range ids {
+				if enqueued >= limit {
+					return nil
+				}
+				item, err := scanWorkflow(tx.QueryRow(ctx, `
+				SELECT id::text, workflow_key, name, description, status, graph, schedule_type,
+				       COALESCE(cron_expression, ''), schedule_timezone, next_run_at,
+				       retry_policy, input, version, editor_layout, layout_version, created_at, updated_at
+				FROM workflows WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
+					s.workspaceID, id))
+				if err != nil {
+					return err
+				}
+				if item.NextRunAt == nil {
+					continue
+				}
+				planned := *item.NextRunAt
+				next, advanceErr := advanceWorkflowSchedule(item, planned, tick)
+				if advanceErr != nil {
+					// A broken schedule must not block the batch or fire every
+					// tick: stop scheduling it and surface the reason.
+					if _, err := tx.Exec(ctx, `
+					UPDATE workflows SET next_run_at = NULL, updated_at = now()
+					WHERE workspace_id = $1 AND id = $2`, s.workspaceID, id); err != nil {
+						return err
+					}
+					skipped = append(skipped, item.WorkflowKey+" (invalid schedule: "+advanceErr.Error()+")")
+					continue
+				}
+				if gateErr := s.workflowFeatures.CheckNew(item.Graph); gateErr != nil {
+					if !errors.Is(gateErr, workflow.ErrFeatureDisabled) {
+						return gateErr
+					}
+					if _, err := tx.Exec(ctx, `UPDATE workflows SET next_run_at=$3 WHERE workspace_id=$1 AND id=$2`, s.workspaceID, id, next); err != nil {
+						return err
+					}
+					if len(skipped) < 100 {
+						skipped = append(skipped, item.WorkflowKey+" (capability disabled)")
+					}
+					continue
+				}
+				var active bool
+				if err := tx.QueryRow(ctx, `
 				SELECT EXISTS(
 					SELECT 1 FROM jobs j
 					JOIN operation_runs o ON o.id = j.operation_id AND o.workspace_id = j.workspace_id
 					WHERE j.workspace_id = $1 AND j.kind = 'workflow_run'
 					  AND j.status IN ('queued', 'running')
 					  AND o.workflow_id = $2 AND o.source = 'schedule')`,
-				s.workspaceID, id).Scan(&active); err != nil {
-				return err
-			}
-			if active {
-				if _, err := tx.Exec(ctx, `
-					UPDATE workflows SET next_run_at = $3, updated_at = now()
-					WHERE workspace_id = $1 AND id = $2`, s.workspaceID, id, next); err != nil {
+					s.workspaceID, id).Scan(&active); err != nil {
 					return err
 				}
-				skipped = append(skipped, item.WorkflowKey)
-				continue
-			}
-			requestID := "workflow-schedule-" + id + "-" + planned.UTC().Format(time.RFC3339Nano)
-			input := WorkflowTriggerInput{
-				Workflow: item, Trigger: nil,
-				Principal: workflow.Principal{Kind: "schedule"},
-				Source:    "schedule", RequestID: requestID,
-				ScheduledFor: &planned,
-			}
-			if err := s.enqueueDueRun(ctx, tx, input, codec); err != nil {
-				if errors.Is(err, ErrBusy) {
-					skipped = append(skipped, item.WorkflowKey+" (workspace capacity reached)")
-					break
+				if active {
+					if _, err := tx.Exec(ctx, `
+					UPDATE workflows SET next_run_at = $3, updated_at = now()
+					WHERE workspace_id = $1 AND id = $2`, s.workspaceID, id, next); err != nil {
+						return err
+					}
+					skipped = append(skipped, item.WorkflowKey)
+					continue
 				}
-				return err
-			}
-			if _, err := tx.Exec(ctx, `
+				requestID := "workflow-schedule-" + id + "-" + planned.UTC().Format(time.RFC3339Nano)
+				input := WorkflowTriggerInput{
+					Workflow: item, Trigger: nil,
+					Principal: workflow.Principal{Kind: "schedule"},
+					Source:    "schedule", RequestID: requestID,
+					ScheduledFor: &planned,
+				}
+				if err := s.enqueueDueRun(ctx, tx, input, codec); err != nil {
+					if errors.Is(err, ErrBusy) {
+						skipped = append(skipped, item.WorkflowKey+" (workspace capacity reached)")
+						return nil
+					}
+					return err
+				}
+				if _, err := tx.Exec(ctx, `
 				UPDATE workflows SET next_run_at = $3, updated_at = now()
 				WHERE workspace_id = $1 AND id = $2`, s.workspaceID, id, next); err != nil {
-				return err
+					return err
+				}
+				enqueued++
 			}
-			enqueued++
+			if len(ids) < limit || enqueued >= limit {
+				return nil
+			}
 		}
-		return nil
 	})
 	return enqueued, skipped, err
 }
@@ -705,12 +729,12 @@ func (s *Store) enqueueDueRun(ctx context.Context, tx pgx.Tx, input WorkflowTrig
 	if err := s.checkWorkflowCapacity(ctx, tx, DefaultWorkflowActiveLimit); err != nil {
 		return err
 	}
-	built, err := s.buildWorkflowSnapshot(ctx, tx, input.Workflow, input.Trigger)
+	now := utcNow()
+	built, err := s.buildWorkflowSnapshot(ctx, tx, input.Workflow, input.Trigger, now, input.ScheduledFor)
 	if err != nil {
 		return err
 	}
 	operationID := StableID("operation", input.RequestID)
-	now := utcNow()
 	expiresAt, err := s.OperationExpiresAt(ctx, now)
 	if err != nil {
 		return err
@@ -794,7 +818,7 @@ func (s *Store) ValidateWorkflowReady(ctx context.Context, item model.Workflow) 
 	if item.Status != "deployed" {
 		return fmt.Errorf("%w: workflow is not deployed", ErrConflict)
 	}
-	if _, err := s.buildWorkflowSnapshot(ctx, s.pool, item, nil); err != nil {
+	if _, err := s.buildWorkflowSnapshot(ctx, s.database(ctx), item, nil, utcNow(), nil); err != nil {
 		return err
 	}
 	if item.ScheduleType == "interval" && cronx.IntervalDuration(item.CronExpression) == 0 {
@@ -819,6 +843,9 @@ func (s *Store) ResolveWorkflowBindings(ctx context.Context, item model.Workflow
 		return model.Workflow{}, fmt.Errorf("%w: %v", ErrConflict, err)
 	}
 	for index, step := range definition.Steps {
+		if !step.IsAPI() {
+			continue
+		}
 		integration, err := s.integrationByIDOrKey(ctx, s.database(ctx), step.IntegrationID)
 		if err != nil || integration.Status != "ready" {
 			return model.Workflow{}, fmt.Errorf("%w: step %q has no ready integration", ErrConflict, step.ID)

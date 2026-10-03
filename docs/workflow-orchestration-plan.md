@@ -1,5 +1,9 @@
 # 工作流编排（阶段 1+2）实现方案
 
+后续可视化升级见[可视化编辑与运行追踪开发文档](workflow-visual-editor-development-plan.md)、[六类节点、UI 与场景规格](workflow-node-design.md)及[JavaScript 代码节点开发流程](workflow-code-node-development-plan.md)。本文保留为现有 API 步骤/runIf 的 v1 实现基线；新增数据处理、JavaScript 代码、IF/多 ELSE IF/ELSE、分支汇合、输入 Schema 和[可变流程变量](workflow-node-design.md#flow-variables)均属待实施升级，不包含在下方“已实施”状态中。下文“不引入解释器/脚本引擎”描述 v1 范围；v2 代码节点采用受限独立执行，尚未实现。
+
+2026-10-03 实施审阅补充：v2 的[失败继续与本地节点身份规则](workflow-node-design.md#failure-contract)、nullable、至少一个 API 的部署边界，以及[事务外编译、共享执行器和角色发布](workflow-code-node-development-plan.md#transaction-boundary)已写入升级文档；v1 图和快照保留原有语义，下方历史实现状态不据此变更。
+
 > 状态：**已实施（2026-10）**。本文档定义实施契约；实现已按「实施顺序」完成：`internal/workflow` 纯引擎、004 迁移与存储层、后台 worker 与 interval/cron 调度、管理端与运行时平面 HTTP API、前端工作流页面与文档均已落地。§12 的「工期紧张时可裁剪项」全部实现（all/any 组合、`{{?}}` 可选引用、加密快照/加密结果列均未裁剪）。
 > 未实现项见 §13（并行执行、断点续跑、脚本引擎、Webhook 触发、可视化画布、运行中取消）。
 > 验收状态：核心功能已实施；2026-10-02 补齐编辑回填、持续轮询、组合条件编辑、样本预览、工作区入队限额、严格版本校验和 unknown 收尾/清理。数据库集成、浏览器及生产验收尚未完成；本机缺少 redis-server，集成脚本无法启动。

@@ -101,6 +101,9 @@ database_url="postgres://${database_user}:${database_password_encoded}@${databas
   printf 'APIHUB_ADMIN_EMAIL=%q\n' 'admin@localhost'
   printf 'APIHUB_PUBLIC_BASE_URL=%q\n' 'http://127.0.0.1:8080'
   printf 'APIHUB_ROLE=%q\n' 'all'
+  printf 'APIHUB_WORKFLOW_V2_ENABLED=%q\n' 'false'
+  printf 'APIHUB_WORKFLOW_CODE_ENABLED=%q\n' 'false'
+  printf 'APIHUB_WORKFLOW_CODE_MAX_CONCURRENCY=%q\n' '2'
 } > "$config_file"
 
 chmod 600 "$config_file"

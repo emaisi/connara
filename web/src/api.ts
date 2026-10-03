@@ -135,7 +135,7 @@ export const api = {
       body,
     }),
   oauthStart: (body: unknown) => request<{ authorizationUrl: string }>("/api/oauth/start", { method: "POST", body }),
-  actions: () => request<any[]>("/api/actions", { allPages: true }),
+  actions: (fresh = false) => request<any[]>("/api/actions", { allPages: true, fresh }),
   saveAction: (body: unknown, id = "") =>
     request<any>(id ? `/api/actions/${encodeURIComponent(id)}` : "/api/actions", {
       method: id ? "PATCH" : "POST",
@@ -143,7 +143,8 @@ export const api = {
     }),
   previewAction: (id: string, body: unknown) =>
     request<any>(`/api/actions/${encodeURIComponent(id)}/preview`, { method: "POST", body }),
-  actionExecutionOptions: (id: string) => request<any[]>(`/api/actions/${encodeURIComponent(id)}/execution-options`),
+  actionExecutionOptions: (id: string, fresh = false) =>
+    request<any[]>(`/api/actions/${encodeURIComponent(id)}/execution-options`, { fresh }),
   action: (id: string) => request<any>(`/api/actions/${encodeURIComponent(id)}`),
   testAction: (id: string, body: unknown) =>
     request<any>(`/api/actions/${encodeURIComponent(id)}/test`, { method: "POST", body }),
@@ -159,15 +160,27 @@ export const api = {
   runSyncTask: (id: string) => request<any>(`/api/sync-tasks/${encodeURIComponent(id)}/run`, { method: "POST" }),
   deleteSyncTask: (id: string) => request<void>(`/api/sync-tasks/${encodeURIComponent(id)}`, { method: "DELETE" }),
   workflows: () => request<any[]>("/api/workflows"),
+  workflow: (id: string) => request<any>(`/api/workflows/${encodeURIComponent(id)}`, { fresh: true }),
+  workflowCapabilities: () => request<any>("/api/workflows/capabilities", { fresh: true }),
+  previewWorkflowStep: (body: unknown) => request<any>("/api/workflows/preview-step", { method: "POST", body }),
+  previewWorkflowSchedule: (body: unknown) => request<any>("/api/workflows/preview-schedule", { method: "POST", body }),
+  saveWorkflowLayout: (id: string, body: unknown) =>
+    request<any>(`/api/workflows/${encodeURIComponent(id)}/layout`, { method: "PATCH", body }),
+  workflowRunView: (id: string) => request<any>(`/api/workflow-runs/${encodeURIComponent(id)}/view`),
   saveWorkflow: (body: unknown, id = "", version = 0) =>
     request<any>(id ? `/api/workflows/${encodeURIComponent(id)}` : "/api/workflows", {
       method: id ? "PATCH" : "POST",
       body: { ...(body as Record<string, unknown>), version },
     }),
-  deployWorkflow: (id: string) => request<any>(`/api/workflows/${encodeURIComponent(id)}/deploy`, { method: "POST" }),
-  pauseWorkflow: (id: string) => request<any>(`/api/workflows/${encodeURIComponent(id)}/pause`, { method: "POST" }),
-  runWorkflow: (id: string, input?: Record<string, unknown>) =>
-    request<any>(`/api/workflows/${encodeURIComponent(id)}/run`, { method: "POST", body: input ? { input } : {} }),
+  deployWorkflow: (id: string, expectedVersion?: number) =>
+    request<any>(`/api/workflows/${encodeURIComponent(id)}/deploy`, { method: "POST", body: { expectedVersion } }),
+  pauseWorkflow: (id: string, expectedVersion?: number) =>
+    request<any>(`/api/workflows/${encodeURIComponent(id)}/pause`, { method: "POST", body: { expectedVersion } }),
+  runWorkflow: (id: string, input?: Record<string, unknown>, expectedVersion?: number) =>
+    request<any>(`/api/workflows/${encodeURIComponent(id)}/run`, {
+      method: "POST",
+      body: { ...(input ? { input } : {}), expectedVersion },
+    }),
   workflowRunResult: (id: string) => request<any>(`/api/workflow-runs/${encodeURIComponent(id)}/result`),
   deleteWorkflow: (id: string) => request<void>(`/api/workflows/${encodeURIComponent(id)}`, { method: "DELETE" }),
   webhookEndpoints: () => request<any[]>("/api/webhook-endpoints"),
@@ -200,7 +213,7 @@ export const api = {
   revokeRuntimeToken: (id: string) =>
     request<void>(`/api/runtime-tokens/${encodeURIComponent(id)}`, { method: "DELETE" }),
   operations: () => request<any[]>("/api/operations"),
-  operation: (id: string) => request<any>(`/api/operations/${encodeURIComponent(id)}`),
+  operation: (id: string) => request<any>(`/api/operations/${encodeURIComponent(id)}`, { fresh: true }),
   metrics: (hours = 24) => request<any>(`/api/metrics?hours=${hours}`),
   auditLogs: () => request<any[]>("/api/audit-logs"),
   teamMembers: () => request<any[]>("/api/team/members"),
@@ -213,6 +226,7 @@ export const api = {
 };
 
 interface RequestOptions {
+  fresh?: boolean;
   method?: string;
   body?: unknown;
   skipUnauthorizedEvent?: boolean;
@@ -222,7 +236,11 @@ interface RequestOptions {
 
 function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   if ((!options.method || options.method === "GET") && !path.startsWith("/api/auth/"))
-    return queryClient.fetchQuery({ queryKey: [path], queryFn: () => fetchRequest<T>(path, options) });
+    return queryClient.fetchQuery({
+      queryKey: [path],
+      queryFn: () => fetchRequest<T>(path, options),
+      ...(options.fresh ? { staleTime: 0, retry: false } : {}),
+    });
   return fetchRequest<T>(path, options).then((value) => {
     if (options.method && options.method !== "GET") {
       if (path === "/api/auth/login" || path === "/api/auth/logout") queryClient.clear();
@@ -312,6 +330,31 @@ function localizedError(payload: unknown): string | undefined {
         ? value.errorCode
         : "";
   const messages: Record<string, [string, string]> = {
+    workflow_preview_busy: [
+      "样本预览正在使用，请保留当前输入后稍后重试",
+      "A preview is active; keep your inputs and try again later",
+    ],
+    code_capacity_busy: [
+      "代码执行繁忙，正式运行优先；当前配置和样本已保留",
+      "Code capacity is busy; formal runs have priority. Your draft and sample are retained",
+    ],
+    code_runtime_unavailable: [
+      "代码执行环境不可用，请联系管理员检查",
+      "The restricted code environment is unavailable",
+    ],
+    workflow_capability_disabled: ["平台暂未开放此工作流能力", "This workflow capability is disabled"],
+    code_compile_error: [
+      "JavaScript 编译失败，请查看源码诊断位置",
+      "JavaScript compilation failed; check the source diagnostics",
+    ],
+    code_entrypoint_invalid: ["请声明同步 function main(input)", "Declare synchronous function main(input)"],
+    code_timeout: ["代码执行超过两秒，已终止本次进程", "Code exceeded two seconds; this process was terminated"],
+    code_output_invalid: [
+      "返回值不符合 JSON、大小或字段声明要求",
+      "The return value violates JSON, size or declared fields",
+    ],
+    code_worker_failed: ["受限代码进程异常退出，本次步骤失败", "The restricted code process exited unexpectedly"],
+
     api_key_exists: ["此系统中已存在相同 API 标识，请更换标识", "This system already has an API with this key"],
     version_required: ["请先刷新请求预览，再执行调用", "Refresh the request preview before executing"],
     configuration_changed: [

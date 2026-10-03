@@ -253,6 +253,8 @@ curl --fail-with-body --request POST \
 # the final output.
 ```
 
+The workflow editor's **调用说明** button provides copyable synchronous, asynchronous, and result-query examples using the saved definition. `GET /v1/workflows/{workflowKey}` returns its `version` and, for workflows with an input contract, `inputSchema`. Discovery does not expose account bindings, credentials, or default input. Explicit `input` replaces the saved default object rather than merging with it. Async result queries require the same runtime token that started the run.
+
 ## Configuration
 
 The public project name is **Connara**. The initial release retains the `apihub` binary names, `APIHUB_*` environment variables, Go module name, and existing database schema for compatibility with earlier local installations.
@@ -405,6 +407,10 @@ docs/                        Design notes, upgrade notes, and console screenshot
 - [Base SQL schema](internal/store/schema.sql) and [v2 migration](internal/store/migrations/002_hardening.sql).
 - [Upgrade procedures and Webhook protocol](docs/hardening-upgrade.md) — Chinese; historical rollout notes refer to their recorded date.
 - [Screenshot provenance](docs/screenshots/README.md).
+
+## Workflow v2 and restricted JavaScript
+
+The visual editor, branch scopes, workflow variables, restricted JavaScript worker and frozen run history are available behind flags that default to `false`. See [runtime setup and scheduling recovery](docs/workflow-code-runtime.md) and [implementation validation](docs/workflow-validation-report.md) before enabling them. The main service and static worker must be shipped together; code executes only in the verified Linux sandbox.
 
 ## Current boundaries
 

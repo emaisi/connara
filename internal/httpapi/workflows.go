@@ -51,6 +51,8 @@ type workflowSaveRequest struct {
 	RetryPolicy      json.RawMessage `json:"retryPolicy"`
 	Input            json.RawMessage `json:"input"`
 	Version          int64           `json:"version"`
+	EditorLayout     json.RawMessage `json:"editorLayout"`
+	LayoutVersion    int64           `json:"layoutVersion"`
 }
 
 func (a *api) saveWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -98,14 +100,14 @@ func (a *api) saveWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 	definition, err := workflow.ParseDefinition(request.Graph)
 	if err != nil {
-		writeAdminError(w, http.StatusBadRequest, "invalid_graph", err.Error())
+		writeWorkflowError(w, http.StatusBadRequest, "invalid_graph", err)
 		return
 	}
 	if err := workflow.ValidateDefinition(definition, false, func(key string) bool {
 		_, loadErr := a.Store.Action(r.Context(), key)
 		return loadErr == nil
 	}); err != nil {
-		writeAdminError(w, http.StatusBadRequest, "invalid_graph", err.Error())
+		writeWorkflowError(w, http.StatusBadRequest, "invalid_graph", err)
 		return
 	}
 	id := chi.URLParam(r, "id")
@@ -114,7 +116,13 @@ func (a *api) saveWorkflow(w http.ResponseWriter, r *http.Request) {
 		Description: request.Description, Graph: request.Graph,
 		ScheduleType: request.ScheduleType, CronExpression: clean(request.CronExpression, 120),
 		ScheduleTimezone: defaultTimezone(request.ScheduleTimezone),
-		RetryPolicy:      request.RetryPolicy, Input: request.Input,
+		RetryPolicy:      request.RetryPolicy, Input: request.Input, EditorLayout: request.EditorLayout,
+	}
+	if len(request.EditorLayout) > 0 {
+		if _, err := workflow.NormalizeLayout(request.EditorLayout, definition, false); err != nil {
+			writeWorkflowError(w, 400, "invalid_layout", workflow.Located(err, "invalid_layout", "", "definition", "/editorLayout"))
+			return
+		}
 	}
 	var saved model.Workflow
 	if id == "" {
@@ -129,13 +137,17 @@ func (a *api) saveWorkflow(w http.ResponseWriter, r *http.Request) {
 			writeAdminError(w, http.StatusConflict, "conflict", "工作流已被其他成员修改，请刷新后重试")
 			return
 		}
-		saved, err = a.Store.SaveWorkflow(r.Context(), item, current.Version)
+		if request.EditorLayout != nil {
+			saved, err = a.Store.SaveWorkflow(r.Context(), item, current.Version, request.LayoutVersion)
+		} else {
+			saved, err = a.Store.SaveWorkflow(r.Context(), item, current.Version)
+		}
 	}
 	if err != nil {
 		a.writeStoreError(w, r, err, "save workflow")
 		return
 	}
-	a.audit(r, "workflow.saved", "workflow", saved.ID, saved.Name, nil, json.RawMessage(safejson.Marshal(saved, 16<<10)))
+	a.audit(r, "workflow.saved", "workflow", saved.ID, saved.Name, nil, workflowAuditSummary(saved))
 	writeJSON(w, statusForSave(r), saved)
 }
 
@@ -155,6 +167,13 @@ func (a *api) deployWorkflow(w http.ResponseWriter, r *http.Request) {
 		a.writeStoreError(w, r, err, "get workflow")
 		return
 	}
+	if !workflowExpectedVersion(w, r, item) {
+		return
+	}
+	if err := a.Store.CheckWorkflowAdmission(item); err != nil {
+		writeAdminError(w, 409, "workflow_capability_disabled", err.Error())
+		return
+	}
 	resolved, err := a.Store.ResolveWorkflowBindings(r.Context(), item)
 	if err != nil {
 		a.writeStoreError(w, r, err, "resolve workflow bindings")
@@ -166,27 +185,61 @@ func (a *api) deployWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := workflow.ValidateDefinition(definition, true, nil); err != nil {
-		writeAdminError(w, http.StatusConflict, "workflow_not_deployable", err.Error())
+		writeWorkflowError(w, http.StatusConflict, "workflow_not_deployable", err)
 		return
 	}
 	if err := validateWorkflowSchedule(resolved.ScheduleType, resolved.CronExpression, resolved.ScheduleTimezone); err != nil {
 		writeAdminError(w, http.StatusBadRequest, "invalid_input", err.Error())
 		return
 	}
-	next := computeNextRun(resolved.ScheduleType, resolved.CronExpression, resolved.ScheduleTimezone, now())
-	saved, err := a.Store.DeployWorkflow(r.Context(), resolved.ID, resolved.Version, resolved.Graph, next)
-	if err != nil {
-		a.writeStoreError(w, r, err, "deploy workflow")
-		return
+	if definition.SchemaVersion == 2 && resolved.ScheduleType != "manual" {
+		var input map[string]any
+		if jsonutil.Unmarshal(resolved.Input, &input) != nil || input == nil {
+			writeAdminError(w, 400, "invalid_input", "scheduled default input must be an object")
+			return
+		}
+		if err := workflow.ValidateTrigger(definition.InputSchema, input); err != nil {
+			writeConfigurationError(w, "input", err)
+			return
+		}
+		metadata, err := workflow.NewRunMetadata(now(), nil, resolved.ScheduleTimezone)
+		if err == nil {
+			_, err = workflow.InitialVariables(definition, input, metadata)
+		}
+		if err != nil {
+			writeAdminError(w, 400, "invalid_variables", "scheduled variable initialization is invalid")
+			return
+		}
 	}
-	a.audit(r, "workflow.deployed", "workflow", saved.ID, saved.Name, nil, json.RawMessage(safejson.Marshal(saved, 16<<10)))
-	writeJSON(w, http.StatusOK, saved)
+	compileCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	for _, step := range definition.Steps {
+		if step.Type == "code" {
+			if err := a.Store.WorkflowCodeRunner().Compile(compileCtx, step, false); err != nil {
+				writeWorkflowError(w, 409, workflow.CodeErrorCode(err), err)
+				return
+			}
+		}
+	}
+	a.audited(func(w http.ResponseWriter, r *http.Request) {
+		next := computeNextRun(resolved.ScheduleType, resolved.CronExpression, resolved.ScheduleTimezone, now())
+		saved, err := a.Store.DeployWorkflow(r.Context(), resolved.ID, resolved.Version, resolved.Graph, next)
+		if err != nil {
+			a.writeStoreError(w, r, err, "deploy workflow")
+			return
+		}
+		a.audit(r, "workflow.deployed", "workflow", saved.ID, saved.Name, nil, workflowAuditSummary(saved))
+		writeJSON(w, http.StatusOK, saved)
+	})(w, r)
 }
 
 func (a *api) pauseWorkflow(w http.ResponseWriter, r *http.Request) {
 	item, err := a.Store.Workflow(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		a.writeStoreError(w, r, err, "get workflow")
+		return
+	}
+	if !workflowExpectedVersion(w, r, item) {
 		return
 	}
 	saved, err := a.Store.PauseWorkflow(r.Context(), item.ID, item.Version)
@@ -258,9 +311,14 @@ func (a *api) workflowRunResult(w http.ResponseWriter, r *http.Request) {
 // falls back to the workflow default; an explicit object overrides it.
 func (a *api) effectiveTrigger(w http.ResponseWriter, r *http.Request, item model.Workflow) (map[string]any, bool) {
 	var request struct {
-		Input json.RawMessage `json:"input"`
+		Input           json.RawMessage `json:"input"`
+		ExpectedVersion *int64          `json:"expectedVersion"`
 	}
 	if !decodeJSON(w, r, &request, true) {
+		return nil, false
+	}
+	if request.ExpectedVersion != nil && (*request.ExpectedVersion <= 0 || *request.ExpectedVersion != item.Version) {
+		writeAdminError(w, 409, "conflict", "workflow version changed")
 		return nil, false
 	}
 	if len(request.Input) == 0 || string(request.Input) == "null" {
@@ -284,6 +342,9 @@ func (a *api) effectiveTrigger(w http.ResponseWriter, r *http.Request, item mode
 }
 
 func validateWorkflowSchedule(scheduleType, cronExpression, timezone string) error {
+	if _, err := cronx.LoadTimezone(timezone); err != nil {
+		return fmt.Errorf("schedule timezone invalid: %v", err)
+	}
 	switch scheduleType {
 	case "manual":
 		return nil
@@ -345,6 +406,8 @@ func computeNextRun(scheduleType, cronExpression, timezone string, from time.Tim
 // credentials, no raw default input.
 type workflowDiscoveryItem struct {
 	WorkflowKey string              `json:"workflowKey"`
+	Version     int64               `json:"version"`
+	InputSchema map[string]any      `json:"inputSchema,omitempty"`
 	Name        string              `json:"name"`
 	Description string              `json:"description"`
 	Steps       []workflowStepBrief `json:"steps"`
@@ -353,7 +416,8 @@ type workflowDiscoveryItem struct {
 type workflowStepBrief struct {
 	ID     string `json:"id"`
 	Title  string `json:"title,omitempty"`
-	Action string `json:"action"`
+	Action string `json:"action,omitempty"`
+	Type   string `json:"type,omitempty"`
 }
 
 // loadDeployedWorkflows returns deployed definitions with the token policy
@@ -368,9 +432,17 @@ func (a *api) runtimeWorkflowSummaries(ctx context.Context, token model.RuntimeT
 	if err != nil {
 		return nil, nil, err
 	}
-	actionKeys := map[string]bool{}
+	actionKeys := map[string]model.ActionDefinition{}
+	counts := map[string]int{}
 	for _, action := range actions {
-		actionKeys[action.ActionKey] = true
+		counts[action.ActionKey]++
+	}
+	for _, action := range actions {
+		actionKeys[action.ID] = action
+		actionKeys[action.SystemKey+"."+action.ActionKey] = action
+		if counts[action.ActionKey] == 1 {
+			actionKeys[action.ActionKey] = action
+		}
 	}
 	connections, err := a.Store.ListConnections(ctx)
 	if err != nil {
@@ -392,9 +464,16 @@ func (a *api) runtimeWorkflowSummaries(ctx context.Context, token model.RuntimeT
 		if err != nil {
 			continue
 		}
+		if a.Store.CheckWorkflowAdmission(item) != nil || workflow.ValidateDefinition(definition, true, nil) != nil {
+			continue
+		}
 		allowed := true
 		for _, step := range definition.Steps {
-			if !actionKeys[step.Action] || !policy.AllowsAction(token, step.Action) {
+			if !step.IsAPI() {
+				continue
+			}
+			action, exists := actionKeys[step.Action]
+			if !exists || !action.Executable || action.Status != "active" || !policy.AllowsAction(token, action.ActionKey) {
 				allowed = false
 				break
 			}
@@ -413,9 +492,9 @@ func (a *api) runtimeWorkflowSummaries(ctx context.Context, token model.RuntimeT
 		if !allowed {
 			continue
 		}
-		summary := workflowDiscoveryItem{WorkflowKey: item.WorkflowKey, Name: item.Name, Description: item.Description}
+		summary := workflowDiscoveryItem{WorkflowKey: item.WorkflowKey, Version: item.Version, InputSchema: definition.InputSchema, Name: item.Name, Description: item.Description}
 		for _, step := range definition.Steps {
-			summary.Steps = append(summary.Steps, workflowStepBrief{ID: step.ID, Title: step.Title, Action: step.Action})
+			summary.Steps = append(summary.Steps, workflowStepBrief{ID: step.ID, Title: step.Title, Action: step.Action, Type: step.Type})
 		}
 		summaries = append(summaries, summary)
 		deployed = append(deployed, item)
@@ -473,6 +552,10 @@ func (a *api) triggerWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeRuntimeError(w, http.StatusForbidden, "policy_denied", reason, nil)
 		return
 	}
+	if err := a.Store.CheckWorkflowAdmission(item); err != nil {
+		writeRuntimeError(w, 409, "workflow_capability_disabled", "workflow capability is disabled", nil)
+		return
+	}
 	trigger, ok := a.effectiveTrigger(w, r, item)
 	if !ok {
 		return
@@ -491,7 +574,14 @@ func (a *api) triggerWorkflow(w http.ResponseWriter, r *http.Request) {
 // connection before anything is enqueued; step-time checks repeat per step.
 func (a *api) workflowPolicyCheck(ctx context.Context, token model.RuntimeToken, definition workflow.Definition) (string, bool) {
 	for _, step := range definition.Steps {
-		if !policy.AllowsAction(token, step.Action) {
+		if !step.IsAPI() {
+			continue
+		}
+		loaded, err := a.Store.Action(ctx, step.Action)
+		if err != nil {
+			return "workflow API is unavailable", false
+		}
+		if !policy.AllowsAction(token, loaded.ActionKey) {
 			return "runtime policy denied action " + step.Action, false
 		}
 	}
@@ -506,6 +596,9 @@ func (a *api) workflowPolicyCheck(ctx context.Context, token model.RuntimeToken,
 		byKey[connection.ConnectionKey] = connection
 	}
 	for _, step := range definition.Steps {
+		if !step.IsAPI() {
+			continue
+		}
 		if step.ConnectionKey == "" {
 			continue
 		}
@@ -646,22 +739,16 @@ func (a *api) triggerWorkflowSync(w http.ResponseWriter, r *http.Request, item m
 	result, runErr := runner.Run(ctx, snapshot, workflow.Options{
 		Principal: workflow.Principal{Kind: "runtime_token", TokenID: token.ID},
 		Attempt:   1,
+		OnStepStart: func(outcome workflow.StepOutcome) {
+			_ = a.Store.AddOperationEvent(ctx, operation.ID, "info", "workflow.step.started", store.MarshalJSON(workflow.StepEvent(outcome, 1, true)))
+		},
 		OnStep: func(outcome workflow.StepOutcome) {
-			attributes := map[string]any{
-				"attempt": 1, "stepId": outcome.StepID, "actionKey": outcome.ActionKey,
-				"status": outcome.Status, "httpStatus": outcome.ProviderStatus,
-			}
-			if outcome.Error != "" {
-				attributes["error"] = outcome.Error
-			}
-			if outcome.Output != nil {
-				attributes["responsePreview"] = json.RawMessage(safejson.Marshal(outcome.Output, 4<<10))
-			}
-			_ = a.Store.AddOperationEvent(ctx, operation.ID, levelForRuntimeStep(outcome.Status), outcome.StepID+" "+outcome.Status, store.MarshalJSON(attributes))
+			_ = a.Store.AddOperationEvent(ctx, operation.ID, levelForRuntimeStep(outcome.Status), "workflow.step.finished", store.MarshalJSON(workflow.StepEvent(outcome, 1, false)))
 		},
 	})
 	finishCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
 	defer stop()
+	_ = a.Store.AddOperationEvent(finishCtx, operation.ID, "info", "workflow.run.finished", store.MarshalJSON(workflow.RunEvent(result, runErr)))
 	if runErr == nil {
 		plain, marshalErr := json.Marshal(result.Final)
 		if marshalErr != nil {

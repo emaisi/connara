@@ -7,9 +7,9 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": "http://127.0.0.1:8080",
-      "/health": "http://127.0.0.1:8080",
-      "/v1": "http://127.0.0.1:8080",
+      "/api": process.env.APIHUB_DEV_API_TARGET ?? "http://127.0.0.1:8080",
+      "/health": process.env.APIHUB_DEV_API_TARGET ?? "http://127.0.0.1:8080",
+      "/v1": process.env.APIHUB_DEV_API_TARGET ?? "http://127.0.0.1:8080",
     },
   },
   build: {
@@ -19,6 +19,7 @@ export default defineConfig({
       output: {
         manualChunks(id) {
           if (id.includes("/node_modules/@tanstack/")) return "tanstack";
+          if (id.includes("/node_modules/react-router/") || id.includes("/node_modules/@remix-run/")) return "router";
         },
       },
     },

@@ -51,6 +51,7 @@ id_ed25519
 .rediscli_history
 coverage/
 web/dogfood-output/
+.zcode/
 .DS_Store
 
 # Local review reports (screenshots for the README live in docs/screenshots/)

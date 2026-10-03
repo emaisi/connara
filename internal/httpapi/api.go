@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -24,6 +25,7 @@ import (
 	"apihub-go/internal/secret"
 	"apihub-go/internal/store"
 	"apihub-go/internal/webui"
+	"apihub-go/internal/workflow"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
@@ -41,7 +43,12 @@ type Dependencies struct {
 	PublicBaseURL string
 }
 
-type api struct{ Dependencies }
+type api struct {
+	Dependencies
+	previewMu     sync.Mutex
+	previewActive bool
+	previewNext   time.Time
+}
 
 type runtimeSuccess struct {
 	Success bool           `json:"success"`
@@ -136,14 +143,19 @@ func New(deps Dependencies) http.Handler {
 			r.Post("/sync-tasks/{id}/run", a.audited(a.runSyncTask))
 			r.Get("/sync-tasks/{id}/records", a.listSyncRecords)
 
+			r.Get("/workflows/capabilities", a.workflowCapabilities)
+			r.Post("/workflows/preview-step", a.previewWorkflowStep)
+			r.Post("/workflows/preview-schedule", a.previewWorkflowSchedule)
 			r.Get("/workflows", a.listWorkflows)
 			r.Post("/workflows", a.audited(a.saveWorkflow))
 			r.Get("/workflows/{id}", a.getWorkflow)
 			r.Patch("/workflows/{id}", a.audited(a.saveWorkflow))
+			r.Patch("/workflows/{id}/layout", a.audited(a.saveWorkflowLayout))
 			r.Delete("/workflows/{id}", a.audited(a.deleteWorkflow))
-			r.Post("/workflows/{id}/deploy", a.audited(a.deployWorkflow))
+			r.Post("/workflows/{id}/deploy", a.deployWorkflow)
 			r.Post("/workflows/{id}/pause", a.audited(a.pauseWorkflow))
 			r.Post("/workflows/{id}/run", a.audited(a.runWorkflowNow))
+			r.Get("/workflow-runs/{id}/view", a.workflowRunView)
 			r.Get("/workflow-runs/{id}/result", a.workflowRunResult)
 
 			r.Get("/webhook-endpoints", a.listWebhookEndpoints)
@@ -333,6 +345,8 @@ func nonNilStrings(values []string) []string {
 
 func statusForStoreError(err error) (int, string) {
 	switch {
+	case errors.Is(err, workflow.ErrFeatureDisabled):
+		return http.StatusConflict, "workflow_feature_disabled"
 	case errors.Is(err, store.ErrNotFound):
 		return http.StatusNotFound, "not_found"
 	case errors.Is(err, store.ErrConflict), store.IsUniqueViolation(err):

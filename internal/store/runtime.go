@@ -211,8 +211,8 @@ func (s *Store) ListOperations(ctx context.Context, kind, status, query string, 
 		AND ($6='' OR (started_at,id)<($7,NULLIF($6,'')::uuid))
  AND ($8='' OR integration_id::text=$8) AND ($9='' OR connection_id::text=$9) AND ($10='' OR sync_task_id::text=$10)
  AND ($11::timestamptz IS NULL OR started_at >= $11) AND ($12::timestamptz IS NULL OR started_at <= $12)
- AND ($13='' OR action_id::text=$13)
- ORDER BY started_at DESC, id DESC LIMIT $5`, s.workspaceID, kind, status, query, limit, o.ID, o.Before, o.IntegrationID, o.ConnectionID, o.SyncTaskID, nullableTime(o.From), nullableTime(o.To), o.ActionID)
+ AND ($13='' OR action_id::text=$13) AND ($14='' OR workflow_id::text=$14)
+ ORDER BY started_at DESC, id DESC LIMIT $5`, s.workspaceID, kind, status, query, limit, o.ID, o.Before, o.IntegrationID, o.ConnectionID, o.SyncTaskID, nullableTime(o.From), nullableTime(o.To), o.ActionID, o.WorkflowID)
 	if err != nil {
 		return nil, err
 	}

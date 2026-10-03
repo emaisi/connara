@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -15,29 +16,34 @@ const (
 )
 
 type Config struct {
-	Address                string
-	DatabaseURL            string
-	RedisAddress           string
-	RedisPassword          string
-	RedisDB                int
-	CatalogDirectory       string
-	AdminPasswordHash      string
-	EncryptionKey          string
-	EncryptionKeyVersion   int
-	PreviousEncryptionKeys string
-	WorkspaceID            string
-	WorkspaceSlug          string
-	WorkspaceName          string
-	AdminUserID            string
-	AdminEmail             string
-	PublicBaseURL          string
-	Role                   string
-	DBMaxConns             int
-	DBMinConns             int
-	SyncWorkers            int
-	WorkflowWorkers        int
-	WebhookWorkers         int
-	AllowedCIDRs           []netip.Prefix
+	WorkflowV2Enabled          bool
+	WorkflowCodeEnabled        bool
+	WorkflowCodeWorkerPath     string
+	WorkflowCodeLauncherPath   string
+	WorkflowCodeMaxConcurrency int
+	Address                    string
+	DatabaseURL                string
+	RedisAddress               string
+	RedisPassword              string
+	RedisDB                    int
+	CatalogDirectory           string
+	AdminPasswordHash          string
+	EncryptionKey              string
+	EncryptionKeyVersion       int
+	PreviousEncryptionKeys     string
+	WorkspaceID                string
+	WorkspaceSlug              string
+	WorkspaceName              string
+	AdminUserID                string
+	AdminEmail                 string
+	PublicBaseURL              string
+	Role                       string
+	DBMaxConns                 int
+	DBMinConns                 int
+	SyncWorkers                int
+	WorkflowWorkers            int
+	WebhookWorkers             int
+	AllowedCIDRs               []netip.Prefix
 }
 
 func Load() (Config, error) {
@@ -83,7 +89,27 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	v2Enabled, err := boolean("APIHUB_WORKFLOW_V2_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	codeEnabled, err := boolean("APIHUB_WORKFLOW_CODE_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	codeConcurrency, err := integer("APIHUB_WORKFLOW_CODE_MAX_CONCURRENCY", 2, 1, 16)
+	if err != nil {
+		return Config{}, err
+	}
+	workerPath := strings.TrimSpace(os.Getenv("APIHUB_WORKFLOW_CODE_WORKER_PATH"))
+	launcherPath := strings.TrimSpace(os.Getenv("APIHUB_WORKFLOW_CODE_LAUNCHER_PATH"))
+	for _, path := range []string{workerPath, launcherPath} {
+		if path != "" && !filepath.IsAbs(path) {
+			return Config{}, errors.New("workflow code executable paths must be absolute")
+		}
+	}
 	config := Config{
+		WorkflowV2Enabled: v2Enabled, WorkflowCodeEnabled: codeEnabled, WorkflowCodeWorkerPath: workerPath, WorkflowCodeLauncherPath: launcherPath, WorkflowCodeMaxConcurrency: codeConcurrency,
 		EncryptionKeyVersion: keyVersion, PreviousEncryptionKeys: os.Getenv("APIHUB_PREVIOUS_ENCRYPTION_KEYS"),
 		Address:           value("APIHUB_ADDRESS", ":8080"),
 		DatabaseURL:       strings.TrimSpace(os.Getenv("APIHUB_DATABASE_URL")),
@@ -168,4 +194,13 @@ func value(name, fallback string) string {
 		return current
 	}
 	return fallback
+}
+
+func boolean(name string, fallback bool) (bool, error) {
+	raw := value(name, strconv.FormatBool(fallback))
+	parsed, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s must be boolean", name)
+	}
+	return parsed, nil
 }

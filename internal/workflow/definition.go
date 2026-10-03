@@ -5,8 +5,11 @@
 package workflow
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 
 	"apihub-go/internal/jsonutil"
 	"apihub-go/internal/model"
@@ -25,21 +28,64 @@ const (
 
 // Step is one node of the graph as authored in the definition JSON.
 type Step struct {
-	ID            string         `json:"id"`
-	Title         string         `json:"title,omitempty"`
-	Action        string         `json:"action"`
-	IntegrationID string         `json:"integrationId"`
-	ConnectionKey string         `json:"connectionKey"`
-	Input         map[string]any `json:"input,omitempty"`
-	DependsOn     []string       `json:"dependsOn,omitempty"`
-	RunIf         *Condition     `json:"runIf,omitempty"`
-	OnError       string         `json:"onError,omitempty"`
+	ID             string           `json:"id"`
+	Type           string           `json:"type,omitempty"`
+	Title          string           `json:"title,omitempty"`
+	Action         string           `json:"action,omitempty"`
+	IntegrationID  string           `json:"integrationId,omitempty"`
+	ConnectionKey  string           `json:"connectionKey,omitempty"`
+	Input          map[string]any   `json:"input,omitempty"`
+	DependsOn      []string         `json:"dependsOn,omitempty"`
+	RunIf          *Condition       `json:"runIf,omitempty"`
+	OnError        string           `json:"onError,omitempty"`
+	Scope          []BranchScope    `json:"scope,omitempty"`
+	Assign         []Assignment     `json:"assign,omitempty"`
+	Source         json.RawMessage  `json:"source,omitempty"`
+	Operations     []map[string]any `json:"operations,omitempty"`
+	Branches       []Branch         `json:"branches,omitempty"`
+	Language       string           `json:"language,omitempty"`
+	RuntimeProfile string           `json:"runtimeProfile,omitempty"`
+	Code           string           `json:"code,omitempty"`
+	InputSchema    map[string]any   `json:"inputSchema,omitempty"`
+	OutputSchema   map[string]any   `json:"outputSchema,omitempty"`
 }
+
+type BranchScope struct {
+	ConditionID string `json:"conditionId"`
+	BranchID    string `json:"branchId"`
+}
+
+type Assignment struct {
+	Variable string          `json:"variable"`
+	Value    json.RawMessage `json:"value"`
+}
+
+type Variable struct {
+	Name        string          `json:"name"`
+	Type        string          `json:"type"`
+	Description string          `json:"description,omitempty"`
+	Nullable    bool            `json:"nullable,omitempty"`
+	Initial     json.RawMessage `json:"initial"`
+}
+
+type Branch struct {
+	ID        string       `json:"id"`
+	Title     string       `json:"title,omitempty"`
+	Default   bool         `json:"default,omitempty"`
+	Condition *Condition   `json:"condition,omitempty"`
+	Assign    []Assignment `json:"assign,omitempty"`
+}
+
+// Empty type is the legacy API spelling, never an unknown local node.
+func (s Step) IsAPI() bool { return s.Type == "" || s.Type == "api" }
 
 // Definition is the parsed workflows.graph document.
 type Definition struct {
-	Steps  []Step         `json:"steps"`
-	Output map[string]any `json:"output"`
+	SchemaVersion int            `json:"schemaVersion,omitempty"`
+	InputSchema   map[string]any `json:"inputSchema,omitempty"`
+	Variables     []Variable     `json:"variables,omitempty"`
+	Steps         []Step         `json:"steps"`
+	Output        map[string]any `json:"output"`
 }
 
 // ParseDefinition decodes and structurally validates a graph document.
@@ -47,9 +93,24 @@ func ParseDefinition(data []byte) (Definition, error) {
 	if len(data) == 0 {
 		return Definition{Steps: []Step{}, Output: map[string]any{}}, nil
 	}
+	if !bytes.HasPrefix(bytes.TrimSpace(data), []byte("{")) {
+		return Definition{}, fmt.Errorf("graph must be a JSON object")
+	}
 	var definition Definition
-	if err := jsonutil.Unmarshal(data, &definition); err != nil {
+	if len(data) > MaxGraphBytes {
+		return Definition{}, fmt.Errorf("graph exceeds 256 KiB")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&definition); err != nil {
 		return Definition{}, fmt.Errorf("graph is not valid JSON: %w", err)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return Definition{}, fmt.Errorf("graph must contain exactly one JSON object")
+	}
+	if definition.SchemaVersion != 0 && definition.SchemaVersion != 1 && definition.SchemaVersion != 2 {
+		return Definition{}, fmt.Errorf("unsupported graph schemaVersion %d", definition.SchemaVersion)
 	}
 	if definition.Steps == nil {
 		definition.Steps = []Step{}
@@ -63,26 +124,51 @@ func ParseDefinition(data []byte) (Definition, error) {
 // StepSnapshot pins one step to concrete action, integration and connection
 // IDs at trigger time; later edits cannot change an accepted run.
 type StepSnapshot struct {
-	ID            string         `json:"id"`
-	Title         string         `json:"title,omitempty"`
-	ActionKey     string         `json:"actionKey"`
-	ActionID      string         `json:"actionId"`
-	ActionVersion int64          `json:"actionVersion"`
-	IntegrationID string         `json:"integrationId"`
-	ConnectionID  string         `json:"connectionId"`
-	Input         map[string]any `json:"input,omitempty"`
-	DependsOn     []string       `json:"dependsOn,omitempty"`
-	RunIf         *Condition     `json:"runIf,omitempty"`
-	OnError       string         `json:"onError,omitempty"`
+	ActionName      string           `json:"actionName,omitempty"`
+	SystemKey       string           `json:"systemKey,omitempty"`
+	HTTPMethod      string           `json:"httpMethod,omitempty"`
+	RelativePath    string           `json:"relativePath,omitempty"`
+	IntegrationName string           `json:"integrationName,omitempty"`
+	ConnectionName  string           `json:"connectionName,omitempty"`
+	ID              string           `json:"id"`
+	Type            string           `json:"type,omitempty"`
+	Title           string           `json:"title,omitempty"`
+	ActionKey       string           `json:"actionKey"`
+	ActionID        string           `json:"actionId"`
+	ActionVersion   int64            `json:"actionVersion"`
+	IntegrationID   string           `json:"integrationId"`
+	ConnectionID    string           `json:"connectionId"`
+	Input           map[string]any   `json:"input,omitempty"`
+	DependsOn       []string         `json:"dependsOn,omitempty"`
+	RunIf           *Condition       `json:"runIf,omitempty"`
+	OnError         string           `json:"onError,omitempty"`
+	Scope           []BranchScope    `json:"scope,omitempty"`
+	Assign          []Assignment     `json:"assign,omitempty"`
+	Source          json.RawMessage  `json:"source,omitempty"`
+	Operations      []map[string]any `json:"operations,omitempty"`
+	Branches        []Branch         `json:"branches,omitempty"`
+	Language        string           `json:"language,omitempty"`
+	RuntimeProfile  string           `json:"runtimeProfile,omitempty"`
+	RunnerBuild     string           `json:"runnerBuild,omitempty"`
+	Code            string           `json:"code,omitempty"`
+	InputSchema     map[string]any   `json:"inputSchema,omitempty"`
+	OutputSchema    map[string]any   `json:"outputSchema,omitempty"`
 }
 
 // Snapshot is the immutable definition of one run, stored encrypted.
 type Snapshot struct {
-	WorkflowID      string         `json:"workflowId"`
-	WorkflowVersion int64          `json:"workflowVersion"`
-	Trigger         map[string]any `json:"trigger"`
-	Steps           []StepSnapshot `json:"steps"`
-	Output          map[string]any `json:"output"`
+	WorkflowName     string          `json:"workflowName,omitempty"`
+	EditorLayout     json.RawMessage `json:"editorLayout,omitempty"`
+	SchemaVersion    int             `json:"schemaVersion,omitempty"`
+	InputSchema      map[string]any  `json:"inputSchema,omitempty"`
+	Variables        []Variable      `json:"variables,omitempty"`
+	InitialVariables map[string]any  `json:"initialVariables,omitempty"`
+	RunMetadata      *RunMetadata    `json:"runMetadata,omitempty"`
+	WorkflowID       string          `json:"workflowId"`
+	WorkflowVersion  int64           `json:"workflowVersion"`
+	Trigger          map[string]any  `json:"trigger"`
+	Steps            []StepSnapshot  `json:"steps"`
+	Output           map[string]any  `json:"output"`
 }
 
 // StepStatus values exposed through the read-only status table.

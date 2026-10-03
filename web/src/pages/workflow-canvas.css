@@ -1,0 +1,52 @@
+/* Keep native cursors recognizable, including browsers with unreliable grab cursors. */
+.workflow-canvas .react-flow__pane,
+.workflow-canvas .react-flow__pane.draggable,
+.workflow-canvas .react-flow__node,
+.workflow-canvas .react-flow__node.selectable,
+.workflow-canvas .react-flow__node.draggable {
+  cursor: default;
+}
+.workflow-canvas .react-flow__pane.dragging,
+.workflow-canvas .react-flow__node.draggable .workflow-drag-handle,
+.workflow-canvas .react-flow__node.draggable.dragging,
+.workflow-canvas .react-flow__node.draggable.dragging .workflow-drag-handle {
+  cursor: move;
+}
+.workflow-canvas .react-flow__handle.connectionindicator {
+  width: 10px;
+  height: 10px;
+  cursor: crosshair;
+}
+.workflow-canvas-tools button {
+  flex-shrink: 0;
+}
+.workflow-editor-tools > button,
+.workflow-editor-tools > div > button,
+.workflow-view-tools > button {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+}
+.workflow-canvas-tools button[aria-pressed="true"] {
+  background: var(--muted);
+  color: #2563eb;
+}
+.workflow-pointer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 20;
+  pointer-events: none;
+}
+.workflow-pointer::after {
+  content: "";
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  top: -10px;
+  left: -10px;
+  border: 2px solid #2563eb;
+  border-radius: 50%;
+  background: rgb(59 130 246 / 8%);
+  box-shadow: 0 0 0 1px white;
+}

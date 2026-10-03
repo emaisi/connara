@@ -182,6 +182,8 @@ export function Modal({
   description,
   children,
   unsavedChanges,
+  className,
+  onCloseAutoFocus,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -189,6 +191,8 @@ export function Modal({
   description: string;
   children: ReactNode;
   unsavedChanges?: boolean;
+  className?: string;
+  onCloseAutoFocus?: () => void;
 }) {
   const [dirty, setDirty] = useState(false);
   const hasUnsavedChanges = unsavedChanges ?? dirty;
@@ -206,7 +210,20 @@ export function Modal({
     >
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-slate-950/55 backdrop-blur-[2px]" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 flex max-h-[90vh] w-[min(94vw,34rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl focus:outline-none">
+        <Dialog.Content
+          onCloseAutoFocus={
+            onCloseAutoFocus
+              ? (event) => {
+                  event.preventDefault();
+                  onCloseAutoFocus();
+                }
+              : undefined
+          }
+          className={cn(
+            "fixed left-1/2 top-1/2 z-50 flex max-h-[90vh] w-[min(94vw,34rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl focus:outline-none",
+            className,
+          )}
+        >
           <div className="flex items-start justify-between gap-4 px-6 pt-6">
             <div className="min-w-0">
               <Dialog.Title className="text-lg font-bold text-[var(--text)]">{title}</Dialog.Title>

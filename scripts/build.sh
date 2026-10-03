@@ -6,6 +6,7 @@ if [[ "${APIHUB_SKIP_WEB_BUILD:-0}" != "1" ]]; then
   npm --prefix web run build
 fi
 mkdir -p bin
-for command in apihub apihub-init apihub-password apihub-rotate-keys; do
+for command in apihub apihub-init apihub-password apihub-rotate-keys apihub-workflow-reschedule; do
   go build -trimpath -o "bin/$command" "./cmd/$command"
 done
+CGO_ENABLED=0 go build -trimpath -o bin/workflow-code-worker ./cmd/workflow-code-worker

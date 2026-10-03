@@ -1,6 +1,7 @@
 package store
 
 import (
+	"apihub-go/internal/workflow"
 	"context"
 	"crypto/sha256"
 	_ "embed"
@@ -35,9 +36,14 @@ var systemAPIsSchema string
 //go:embed migrations/005_auth_extensions.sql
 var authExtensionsSchema string
 
+//go:embed migrations/007_workflow_editor.sql
+var workflowEditorSchema string
+
 type Store struct {
-	pool        *pgxpool.Pool
-	workspaceID string
+	workflowFeatures workflow.Features
+	codeRunner       *workflow.CodeRunner
+	pool             *pgxpool.Pool
+	workspaceID      string
 }
 
 type transactionContextKey struct{}
@@ -163,7 +169,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return fmt.Errorf("ensure schema migrations: %w", err)
 	}
 
-	for index, migration := range []string{schema, hardeningSchema, optimizationSchema, workflowsSchema, authExtensionsSchema, systemAPIsSchema} {
+	for index, migration := range []string{schema, hardeningSchema, optimizationSchema, workflowsSchema, authExtensionsSchema, systemAPIsSchema, workflowEditorSchema} {
 		version := index + 1
 		var applied bool
 		if err := conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=$1)`, version).Scan(&applied); err != nil {
@@ -239,8 +245,8 @@ func (s *Store) CheckSchema(ctx context.Context) error {
 	if err := s.database(ctx).QueryRow(ctx, `SELECT COALESCE(max(version),0) FROM schema_migrations`).Scan(&latest); err != nil {
 		return fmt.Errorf("run apihub-init with migration credentials first: %w", err)
 	}
-	if latest != 6 {
-		return fmt.Errorf("schema version %d unsupported; run apihub-init (expected 6)", latest)
+	if latest != 7 {
+		return fmt.Errorf("schema version %d unsupported; run apihub-init (expected 7)", latest)
 	}
 	return nil
 }

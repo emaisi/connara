@@ -465,3 +465,5 @@ func TestRunnerNonJSONBodyReadableAsString(t *testing.T) {
 		t.Fatal("sub-path into non-JSON response expected failure")
 	}
 }
+
+func (d *fakeDeps) AuthorizeRun(context.Context, Principal) error { return nil }

@@ -18,7 +18,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { useSearchParams } from "react-router";
+import { useSearchParams, useNavigate } from "react-router";
 import { operationKindLabel, statusLabel, useDemo, type DemoOperation } from "../demo";
 import { Badge, Button, Card, CopyButton, Field, Modal, PageHeader, cn, fieldClass } from "../ui";
 import { Tabs } from "./core-shared";
@@ -27,6 +27,7 @@ import { api } from "../api";
 import { RequestResponseDetails } from "./request-response-details";
 
 export function OperationsPage() {
+  const navigate = useNavigate();
   const demo = useDemo();
   const [searchParams, setSearchParams] = useSearchParams();
   const [query, setQuery] = useState("");
@@ -83,6 +84,11 @@ export function OperationsPage() {
   }));
 
   function openOperation(operation: DemoOperation) {
+    const raw = history.items.find((item) => item.id === operation.id);
+    if (raw?.kind === "workflow") {
+      navigate(`/workflow-runs/${operation.id}`);
+      return;
+    }
     setSelected(operation);
     setDetail(null);
     if (searchParams.get("run") !== operation.id) {

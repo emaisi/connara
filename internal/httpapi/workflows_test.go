@@ -20,6 +20,7 @@ import (
 	"apihub-go/internal/secret"
 	"apihub-go/internal/store"
 	"apihub-go/internal/testutil"
+	"apihub-go/internal/workflow"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -158,11 +159,15 @@ func (e *workflowTestEnv) request(t *testing.T, method, target string, token mod
 	request := httptest.NewRequest(method, target, reader)
 	request.Header.Set("Content-Type", "application/json")
 	route := chi.NewRouteContext()
-	route.URLParams.Add("key", "order-flow")
+	route.URLParams.Add("key", strings.TrimPrefix(request.URL.Path, "/v1/workflows/"))
 	request = request.WithContext(context.WithValue(request.Context(), chi.RouteCtxKey, route))
 	request = request.WithContext(context.WithValue(request.Context(), runtimeTokenKey, token))
 	response := httptest.NewRecorder()
-	e.api.triggerWorkflow(response, request)
+	if method == http.MethodGet {
+		e.api.runtimeWorkflow(response, request)
+	} else {
+		e.api.triggerWorkflow(response, request)
+	}
 	var payload map[string]any
 	_ = json.Unmarshal(response.Body.Bytes(), &payload)
 	return response, payload
@@ -313,7 +318,26 @@ func reflectDeepEqual(left, right any) bool {
 
 func TestWorkflowDiscoveryFiltersByPolicy(t *testing.T) {
 	env := newWorkflowEnv(t)
-	env.deployWorkflow(t)
+	deployed := env.deployWorkflow(t)
+	env.db.ConfigureWorkflows(workflow.Features{V2Enabled: true}, env.db.WorkflowCodeRunner())
+	var graph map[string]any
+	if err := json.Unmarshal(deployed.Graph, &graph); err != nil {
+		t.Fatal(err)
+	}
+	graph["schemaVersion"] = 2
+	graph["inputSchema"] = map[string]any{"type": "object", "properties": map[string]any{"customerId": map[string]any{"type": "string"}}}
+	for _, step := range graph["steps"].([]any) {
+		step.(map[string]any)["type"] = "api"
+	}
+	deployed.Graph, _ = json.Marshal(graph)
+	saved, err := env.db.SaveWorkflow(context.Background(), deployed, deployed.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployed, err = env.db.DeployWorkflow(context.Background(), saved.ID, saved.Version, saved.Graph, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest("GET", "/v1/workflows", nil)
 	request = request.WithContext(context.WithValue(request.Context(), runtimeTokenKey, env.token))
@@ -329,6 +353,18 @@ func TestWorkflowDiscoveryFiltersByPolicy(t *testing.T) {
 	}
 	if len(payload.Data) != 1 || payload.Data[0]["workflowKey"] != "order-flow" {
 		t.Fatalf("expected discovered workflow: %s", recorder.Body.String())
+	}
+	if payload.Data[0]["version"] != float64(deployed.Version) || payload.Data[0]["inputSchema"] == nil {
+		t.Fatalf("missing runtime contract: %s", recorder.Body.String())
+	}
+	detail, detailPayload := env.request(t, "GET", "/v1/workflows/order-flow", env.token, "")
+	if detail.Code != http.StatusOK || detailPayload["data"].(map[string]any)["inputSchema"] == nil {
+		t.Fatalf("missing workflow detail contract: %s", detail.Body.String())
+	}
+	for _, forbidden := range []string{"connectionKey", "integrationId", "C-1", "credential"} {
+		if strings.Contains(detail.Body.String(), forbidden) {
+			t.Fatalf("runtime contract leaked %s: %s", forbidden, detail.Body.String())
+		}
 	}
 	// The other token denies test.create and must not see the workflow.
 	deniedRecorder := httptest.NewRecorder()

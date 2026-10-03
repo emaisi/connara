@@ -20,6 +20,7 @@ import (
 	"apihub-go/internal/rediscache"
 	"apihub-go/internal/secret"
 	"apihub-go/internal/store"
+	"apihub-go/internal/workflow"
 )
 
 func main() {
@@ -44,6 +45,15 @@ func main() {
 		os.Exit(1)
 	}
 	defer database.Close()
+	codeRunner := workflow.NewCodeRunner(settings.WorkflowCodeWorkerPath, settings.WorkflowCodeLauncherPath, settings.WorkflowCodeMaxConcurrency)
+	database.ConfigureWorkflows(workflow.Features{V2Enabled: settings.WorkflowV2Enabled, CodeEnabled: settings.WorkflowCodeEnabled}, codeRunner)
+	if settings.WorkflowCodeEnabled && (settings.Role != "scheduler" || settings.WorkflowCodeWorkerPath != "" || settings.WorkflowCodeLauncherPath != "") {
+		if err := codeRunner.Probe(startup); err != nil {
+			logger.Error("workflow code sandbox unavailable", "code", workflow.CodeErrorCode(err))
+			os.Exit(1)
+		}
+	}
+
 	cache, err := rediscache.Open(startup, settings.RedisAddress, settings.RedisPassword, settings.RedisDB)
 	if err != nil {
 		logger.Warn("Redis unavailable; control plane will start degraded", "error", err)
