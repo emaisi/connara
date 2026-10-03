@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router";
 import { api } from "./api";
+import { PermissionContext } from "./permissions";
 import { DemoProvider, useDemo } from "./demo";
 import { AuthMethodsPage } from "./pages/demo-core";
 import { ResourcesPage } from "./pages/demo-platform";
@@ -119,7 +120,7 @@ describe("backend-backed console state", () => {
     expect(screen.getByText("connected")).toBeInTheDocument();
   });
 
-  it("keeps enterprise authentication templates visible before login", () => {
+  it("shows built-in and enterprise authentication methods together", () => {
     render(
       <MemoryRouter initialEntries={["/auth"]}>
         <DemoProvider>
@@ -127,91 +128,134 @@ describe("backend-backed console state", () => {
         </DemoProvider>
       </MemoryRouter>,
     );
-    fireEvent.click(screen.getByRole("tab", { name: "企业认证" }));
+    expect(screen.getByRole("tab", { name: "认证模板" })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "企业认证" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /OAuth 2.0 授权码/ })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /用户名密码换 Token/ }));
     expect(screen.getByRole("button", { name: "使用此模板添加实例" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "预览登录流程" })).not.toBeInTheDocument();
   });
 
-  it("documents only the supported REST boundary", () => {
+  it("manages accounts inside the authentication center and switches tabs on the same route", async () => {
+    mockBackend();
     render(
-      <MemoryRouter initialEntries={["/resources"]}>
+      <PermissionContext.Provider value="owner">
+        <MemoryRouter initialEntries={["/auth?section=accounts"]}>
+          <DemoProvider>
+            <AuthMethodsPage />
+          </DemoProvider>
+        </MemoryRouter>
+      </PermissionContext.Provider>,
+    );
+    await waitFor(() => expect(screen.getByRole("tab", { name: "账号" })).toHaveAttribute("aria-selected", "true"));
+    expect(screen.getAllByRole("heading", { name: "认证中心" })).toHaveLength(1);
+    expect(screen.queryByRole("heading", { name: "账号" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "集成构建流程" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "认证模板" }));
+    expect(await screen.findByRole("tab", { name: "内置模板" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "账号" }));
+    expect(await screen.findByRole("textbox", { name: "搜索账号" })).toBeInTheDocument();
+  });
+
+  it("waits for backend capabilities before labeling auth methods", async () => {
+    mockBackend();
+    const base = vi.mocked(fetch).getMockImplementation()!;
+    let resolveMeta!: () => void;
+    vi.mocked(fetch).mockImplementation((input, init) => {
+      if (String(input) === "/api/meta")
+        return new Promise<Response>((resolve) => {
+          resolveMeta = () => {
+            resolve(
+              new Response(JSON.stringify({ name: "APIHub", supportedAuthFlows: ["oauth2_code", "static"] }), {
+                headers: { "Content-Type": "application/json" },
+              }),
+            );
+          };
+        });
+      return base(input, init);
+    });
+    render(
+      <MemoryRouter initialEntries={["/auth"]}>
         <DemoProvider>
-          <ResourcesPage />
+          <AuthMethodsPage />
         </DemoProvider>
       </MemoryRouter>,
     );
-    expect(screen.getByRole("heading", { name: "开发者文档" })).toBeInTheDocument();
-    expect(screen.queryByText(/\/v1\/proxy/)).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "MCP" })).not.toBeInTheDocument();
+    await waitFor(() => expect(resolveMeta).toBeTypeOf("function"));
+    expect(screen.getAllByText("正在确认…").length).toBeGreaterThan(0);
+    expect(screen.queryByText("当前服务未启用")).not.toBeInTheDocument();
+    resolveMeta();
+    await waitFor(() => expect(screen.getAllByText("可直接使用")).toHaveLength(3));
+    expect(screen.queryByText("正在确认…")).not.toBeInTheDocument();
   });
-});
 
-function OAuthHarness() {
-  const { authInstances, toggleAuthInstance } = useDemo();
-  return (
-    <>
-      <output data-testid="scopes">{JSON.stringify(authInstances[0]?.scopes)}</output>
-      <button onClick={() => toggleAuthInstance("oauth1")}>切换认证状态</button>
-    </>
-  );
-}
-it("preserves OAuth scopes and authorization parameters across status updates", async () => {
-  mockBackend();
-  const base = vi.mocked(fetch).getMockImplementation()!;
-  let saved: any;
-  vi.mocked(fetch).mockImplementation((input, init) => {
-    if (String(input) === "/api/auth-instances")
-      return json([
-        {
-          id: "oauth1",
-          version: 4,
-          instanceKey: "oauth",
-          name: "OAuth",
-          authTemplateKey: "api_key",
-          systemKey: "github",
-          status: "ready",
-          publicConfig: {
-            scopes: ["read", "write"],
-            authorizationParams: { prompt: "consent" },
-            verificationPath: "/me",
+  it("saves an authentication instance without an environment, account or upstream call", async () => {
+    mockBackend();
+    const base = vi.mocked(fetch).getMockImplementation()!;
+    const calls: { path: string; method: string; body?: Record<string, unknown> }[] = [];
+    vi.mocked(fetch).mockImplementation((input, init) => {
+      const path = String(input).split("?")[0];
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      calls.push({ path, method, body });
+      if (path === "/api/auth-templates")
+        return json([
+          {
+            id: "t1",
+            templateKey: "username-password-token",
+            name: "User token",
+            flowType: "password_token",
+            source: "builtin",
+            status: "published",
+            credentialSchema: {},
+            tokenRequest: {},
+            injectionRules: [],
           },
-        },
-      ]);
-    if (String(input) === "/api/auth-instances/oauth1") {
-      saved = JSON.parse(String(init?.body));
-      return json({ id: "oauth1" });
-    }
-    return base(input, init);
+        ]);
+      if (path === "/api/meta") return json({ name: "APIHub", supportedAuthFlows: ["password_token"] });
+      if (path === "/api/auth-instances" && method === "POST")
+        return json({
+          id: "auth-1",
+          instanceKey: body?.instanceKey,
+          name: body?.name,
+          systemKey: "github",
+          authTemplateKey: "username-password-token",
+          status: "ready",
+          version: 1,
+        });
+      return base(input, init);
+    });
+    render(
+      <PermissionContext.Provider value="owner">
+        <MemoryRouter initialEntries={["/auth?section=instances&system=github"]}>
+          <DemoProvider>
+            <AuthMethodsPage />
+          </DemoProvider>
+        </MemoryRouter>
+      </PermissionContext.Provider>,
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "添加认证实例" })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole("button", { name: "添加认证实例" }));
+    fireEvent.change(screen.getByLabelText(/认证 \/ Token 地址/), {
+      target: { value: "https://api.example.com/token" },
+    });
+    expect(screen.queryByLabelText(/API 基础地址/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/账号名称/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "保存认证实例" }));
+    await waitFor(() =>
+      expect(calls.filter((call) => call.path === "/api/auth-instances" && call.method === "POST")).toHaveLength(1),
+    );
+    const save = calls.find((call) => call.path === "/api/auth-instances" && call.method === "POST");
+    expect(save?.body).toMatchObject({ systemId: "s1", authTemplateId: "t1" });
+    expect(
+      calls.some(
+        (call) =>
+          call.method !== "GET" &&
+          (call.path === "/api/integrations" ||
+            call.path === "/api/connections" ||
+            call.path.endsWith("/verify") ||
+            call.path.includes("/check")),
+      ),
+    ).toBe(false);
   });
-  render(
-    <DemoProvider>
-      <OAuthHarness />
-    </DemoProvider>,
-  );
-  await waitFor(() => expect(screen.getByTestId("scopes").textContent).toBe('["read","write"]'));
-  fireEvent.click(screen.getByText("切换认证状态"));
-  await waitFor(() =>
-    expect(saved?.publicConfig).toEqual({
-      scopes: ["read", "write"],
-      authorizationParams: { prompt: "consent" },
-      verificationPath: "/me",
-      authorizationUrl: "",
-    }),
-  );
-  expect(saved.version).toBe(4);
-});
-it("keeps healthy resources visible when another resource fails", async () => {
-  mockBackend();
-  const base = vi.mocked(fetch).getMockImplementation()!;
-  vi.mocked(fetch).mockImplementation((input, init) =>
-    String(input) === "/api/operations" ? json({ message: "history unavailable" }, 503) : base(input, init),
-  );
-  render(
-    <DemoProvider>
-      <Harness />
-    </DemoProvider>,
-  );
-  await waitFor(() => expect(screen.getByText("1 systems")).toBeInTheDocument(), { timeout: 3000 });
-  expect(screen.getByText("connected")).toBeInTheDocument();
 });

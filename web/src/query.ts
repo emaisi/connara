@@ -13,6 +13,7 @@ export function invalidateResources(path: string) {
     connections: ["systems", "integrations", "operations"],
     actions: ["systems", "operations", "metrics", "connections"],
     "sync-tasks": ["operations", "metrics"],
+    workflows: ["operations", "metrics"],
     "webhook-endpoints": ["webhook-deliveries"],
     "webhook-deliveries": ["operations"],
     settings: ["meta"],

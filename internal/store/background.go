@@ -24,13 +24,13 @@ type WebhookDeliveryWork struct {
 }
 
 func (s *Store) MarkOperationRunning(ctx context.Context, id string) error {
-	_, err := s.pool.Exec(ctx, `UPDATE operation_runs SET status = 'running' WHERE workspace_id = $1 AND id = $2 AND status = 'queued'`, s.workspaceID, id)
+	_, err := s.database(ctx).Exec(ctx, `UPDATE operation_runs SET status = 'running' WHERE workspace_id = $1 AND id = $2 AND status = 'queued'`, s.workspaceID, id)
 	return err
 }
 
 func (s *Store) EnqueueDueSyncTasks(ctx context.Context, limit int) (int, error) {
 	count := 0
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	err := s.withTx(ctx, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT st.id::text FROM sync_tasks st WHERE st.workspace_id=$1 AND st.status='deployed' AND st.schedule_type='interval' AND st.deleted_at IS NULL AND st.next_run_at<=now()
  AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.workspace_id=$1 AND j.kind='sync_run' AND j.resource_id=st.id AND j.status IN ('queued','running'))
  ORDER BY st.next_run_at,st.id FOR UPDATE OF st SKIP LOCKED LIMIT $2`, s.workspaceID, limit)
@@ -75,7 +75,7 @@ func (s *Store) ExpandOutbox(ctx context.Context, limit int) (int, error) {
 		limit = 50
 	}
 	count := 0
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	err := s.withTx(ctx, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT id::text, event_type, payload FROM outbox_events WHERE workspace_id = $1 AND status = 'pending' AND available_at <= now() ORDER BY available_at, id FOR UPDATE SKIP LOCKED LIMIT $2`, s.workspaceID, limit)
 		if err != nil {
 			return err
@@ -150,7 +150,7 @@ func (s *Store) ExpandOutbox(ctx context.Context, limit int) (int, error) {
 
 func (s *Store) WebhookDeliveryWork(ctx context.Context, id string) (WebhookDeliveryWork, error) {
 	var item WebhookDeliveryWork
-	err := s.pool.QueryRow(ctx, `
+	err := s.database(ctx).QueryRow(ctx, `
 		SELECT wd.id::text, we.id::text, oe.id::text, oe.event_type, oe.payload,
 		       wd.target_url, COALESCE(we.fallback_url, ''), we.secret_blob, wd.attempt_count,wd.status
 		FROM webhook_deliveries wd JOIN outbox_events oe ON oe.id=wd.outbox_event_id AND oe.workspace_id=wd.workspace_id
@@ -160,7 +160,7 @@ func (s *Store) WebhookDeliveryWork(ctx context.Context, id string) (WebhookDeli
 }
 
 func (s *Store) FinishWebhookDeliveryAttempt(ctx context.Context, job model.Job, attempt model.WebhookDeliveryAttempt, delivered, dead bool) error {
-	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	return s.withTx(ctx, func(tx pgx.Tx) error {
 		if err := s.fenceJob(ctx, tx, job); err != nil {
 			return err
 		}

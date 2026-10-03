@@ -32,6 +32,11 @@ type Config struct {
 	AdminEmail             string
 	PublicBaseURL          string
 	Role                   string
+	DBMaxConns             int
+	DBMinConns             int
+	SyncWorkers            int
+	WorkflowWorkers        int
+	WebhookWorkers         int
 	AllowedCIDRs           []netip.Prefix
 }
 
@@ -47,6 +52,36 @@ func Load() (Config, error) {
 	keyVersion, err := strconv.Atoi(value("APIHUB_ENCRYPTION_KEY_VERSION", "1"))
 	if err != nil || keyVersion < 1 || keyVersion > 32767 {
 		return Config{}, errors.New("invalid encryption key version")
+	}
+	role := value("APIHUB_ROLE", "all")
+	switch role {
+	case "all", "api", "worker", "scheduler":
+	default:
+		return Config{}, errors.New("APIHUB_ROLE must be all, api, worker, or scheduler")
+	}
+	syncWorkers, err := integer("APIHUB_SYNC_WORKERS", 1, 0, 64)
+	if err != nil {
+		return Config{}, err
+	}
+	workflowWorkers, err := integer("APIHUB_WORKFLOW_WORKERS", 2, 0, 64)
+	if err != nil {
+		return Config{}, err
+	}
+	webhookWorkers, err := integer("APIHUB_WEBHOOK_WORKERS", 3, 0, 64)
+	if err != nil {
+		return Config{}, err
+	}
+	if (role == "all" || role == "worker") && syncWorkers+webhookWorkers+workflowWorkers == 0 {
+		return Config{}, errors.New("at least one background worker is required")
+	}
+	defaultMax, defaultMin := databasePoolDefaults(role, syncWorkers+webhookWorkers+workflowWorkers)
+	dbMaxConns, err := integer("APIHUB_DB_MAX_CONNS", defaultMax, 1, 1000)
+	if err != nil {
+		return Config{}, err
+	}
+	dbMinConns, err := integer("APIHUB_DB_MIN_CONNS", defaultMin, 0, dbMaxConns)
+	if err != nil {
+		return Config{}, err
 	}
 	config := Config{
 		EncryptionKeyVersion: keyVersion, PreviousEncryptionKeys: os.Getenv("APIHUB_PREVIOUS_ENCRYPTION_KEYS"),
@@ -64,7 +99,12 @@ func Load() (Config, error) {
 		AdminUserID:       value("APIHUB_ADMIN_USER_ID", DefaultAdminUserID),
 		AdminEmail:        value("APIHUB_ADMIN_EMAIL", "admin@localhost"),
 		PublicBaseURL:     value("APIHUB_PUBLIC_BASE_URL", "http://127.0.0.1:8080"),
-		Role:              value("APIHUB_ROLE", "all"),
+		Role:              role,
+		DBMaxConns:        dbMaxConns,
+		DBMinConns:        dbMinConns,
+		SyncWorkers:       syncWorkers,
+		WorkflowWorkers:   workflowWorkers,
+		WebhookWorkers:    webhookWorkers,
 		AllowedCIDRs:      allowedCIDRs,
 	}
 	if config.DatabaseURL == "" {
@@ -77,12 +117,34 @@ func Load() (Config, error) {
 	if config.EncryptionKey == "" {
 		return Config{}, errors.New("APIHUB_ENCRYPTION_KEY is required")
 	}
-	switch config.Role {
-	case "all", "api", "worker", "scheduler":
-	default:
-		return Config{}, errors.New("APIHUB_ROLE must be all, api, worker, or scheduler")
-	}
 	return config, nil
+}
+
+func integer(name string, fallback, minimum, maximum int) (int, error) {
+	current, err := strconv.Atoi(value(name, strconv.Itoa(fallback)))
+	if err != nil || current < minimum || current > maximum {
+		return 0, fmt.Errorf("%s must be between %d and %d", name, minimum, maximum)
+	}
+	return current, nil
+}
+
+func databasePoolDefaults(role string, workers int) (int, int) {
+	switch role {
+	case "scheduler":
+		return 4, 1
+	case "worker":
+		if workers+4 > 12 {
+			return workers + 4, 1
+		}
+		return 12, 1
+	case "api":
+		return 16, 2
+	default:
+		if workers+16 > 24 {
+			return workers + 16, 2
+		}
+		return 24, 2
+	}
 }
 
 func parseCIDRs(raw string) ([]netip.Prefix, error) {

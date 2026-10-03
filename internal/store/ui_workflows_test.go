@@ -18,37 +18,40 @@ func TestInvitationExpiresRevokesAndConsumesOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	owner := members[0].UserID
-	if _, err = db.InviteMember(ctx, email, "viewer", owner, "old-hash", time.Now().Add(time.Hour)); err != nil {
+	oldHash := testutil.ID("old-hash")
+	newHash := testutil.ID("new-hash")
+	if _, err = db.InviteMember(ctx, email, "viewer", owner, oldHash, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = db.InviteMember(ctx, email, "developer", owner, "new-hash", time.Now().Add(time.Hour)); err != nil {
+	if _, err = db.InviteMember(ctx, email, "developer", owner, newHash, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = db.AcceptInvitation(ctx, "old-hash", "password-hash", "Name"); !errors.Is(err, store.ErrNotFound) {
+	if _, err = db.AcceptInvitation(ctx, oldHash, "password-hash", "Name"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("old invitation remained valid: %v", err)
 	}
-	member, err := db.AcceptInvitation(ctx, "new-hash", "password-hash", "Name")
+	member, err := db.AcceptInvitation(ctx, newHash, "password-hash", "Name")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if member.Status != "active" || member.Role != "developer" || member.DisplayName != "Name" {
 		t.Fatalf("incorrect activation: %+v", member)
 	}
-	if _, err = db.AcceptInvitation(ctx, "new-hash", "replacement-password", "Name"); !errors.Is(err, store.ErrNotFound) {
+	if _, err = db.AcceptInvitation(ctx, newHash, "replacement-password", "Name"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("token reused: %v", err)
 	}
-	if _, err = db.InviteMember(ctx, email, "admin", owner, "reset-hash", time.Now().Add(time.Hour)); !errors.Is(err, store.ErrConflict) {
+	if _, err = db.InviteMember(ctx, email, "admin", owner, testutil.ID("reset-hash"), time.Now().Add(time.Hour)); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("active account could be reset: %v", err)
 	}
 	expired := testutil.ID("expired") + "@example.test"
-	if _, err = db.InviteMember(ctx, expired, "viewer", owner, "expired-hash", time.Now().Add(-time.Hour)); err != nil {
+	expiredHash := testutil.ID("expired-hash")
+	if _, err = db.InviteMember(ctx, expired, "viewer", owner, expiredHash, time.Now().Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = db.AcceptInvitation(ctx, "expired-hash", "password", "Name"); !errors.Is(err, store.ErrNotFound) {
+	if _, err = db.AcceptInvitation(ctx, expiredHash, "password", "Name"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("expired invitation accepted: %v", err)
 	}
 	other := testutil.Database(t)
-	if _, err = other.AcceptInvitation(ctx, "new-hash", "password", "Name"); !errors.Is(err, store.ErrNotFound) {
+	if _, err = other.AcceptInvitation(ctx, newHash, "password", "Name"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("cross workspace activation: %v", err)
 	}
 }

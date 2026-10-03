@@ -3,6 +3,7 @@ export interface Meta {
   version: string;
   workspaceId: string;
   providerCount: number;
+  supportedAuthFlows?: string[];
 }
 
 export interface AdminSession {

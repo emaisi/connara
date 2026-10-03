@@ -2,7 +2,6 @@ import { queryClient, invalidateResources } from "./query";
 import type {
   Action,
   AdminSession,
-  Connection,
   CreatedRuntimeToken,
   Integration,
   Meta,
@@ -20,9 +19,30 @@ export class ApiError extends Error {
     readonly requestId = "",
     readonly operationId = "",
     readonly rawMessage = "",
+    readonly details?: unknown,
+    readonly outcome?: string,
+    readonly meta?: Record<string, unknown>,
   ) {
     super(message);
   }
+}
+
+export interface AdminConnection {
+  id: string;
+  connectionKey: string;
+  name: string;
+  integrationId: string;
+  integrationKey: string;
+  authInstanceId: string;
+  endUserKey: string;
+  status: string;
+  revision: number;
+  lastVerifiedAt?: string;
+}
+
+export interface AdminAuthInstance {
+  id: string;
+  version: number;
 }
 
 export const api = {
@@ -46,7 +66,8 @@ export const api = {
   provider: (service: string) => request<Provider>(`/api/systems/${encodeURIComponent(service)}`),
   searchActions: (query: string, service = "") =>
     request<Action[]>(`/api/actions?q=${encodeURIComponent(query)}&system=${encodeURIComponent(service)}`),
-  runs: (limit = 100) => request<Run[]>(`/api/operations?limit=${limit}`),
+  runs: (limit = 100, actionId = "") =>
+    request<Run[]>(`/api/operations?limit=${limit}&action=${encodeURIComponent(actionId)}`),
   systemGroups: () => request<any[]>("/api/system-groups"),
   saveSystemGroup: (body: unknown) => request<any>("/api/system-groups", { method: "POST", body }),
   updateSystemGroup: (id: string, body: unknown) =>
@@ -57,10 +78,10 @@ export const api = {
   createSystem: (body: unknown) => request<any>("/api/systems", { method: "POST", body }),
   updateSystem: (id: string, body: unknown) =>
     request<any>(`/api/systems/${encodeURIComponent(id)}`, { method: "PATCH", body }),
-  setSystemAuthTemplates: (id: string, authTemplateIds: string[]) =>
+  setSystemAuthTemplates: (id: string, authTemplateIds: string[], defaultAuthTemplateId: string) =>
     request<any>(`/api/systems/${encodeURIComponent(id)}/auth-templates`, {
       method: "PUT",
-      body: { authTemplateIds },
+      body: { authTemplateIds, defaultAuthTemplateId },
     }),
   authTemplates: () => request<any[]>("/api/auth-templates"),
   saveAuthTemplate: (body: unknown, id = "") =>
@@ -68,14 +89,19 @@ export const api = {
       method: id ? "PATCH" : "POST",
       body,
     }),
-  setAuthTemplateStatus: (id: string, status: string) =>
-    request<any>(`/api/auth-templates/${encodeURIComponent(id)}/status`, { method: "POST", body: { status } }),
+  setAuthTemplateStatus: (id: string, status: string, version?: number) =>
+    request<any>(`/api/auth-templates/${encodeURIComponent(id)}/status`, { method: "POST", body: { status, version } }),
   deleteAuthTemplate: (id: string) =>
     request<void>(`/api/auth-templates/${encodeURIComponent(id)}`, { method: "DELETE" }),
   authInstances: () => request<any[]>("/api/auth-instances"),
   saveAuthInstance: (body: unknown, id = "") =>
-    request<any>(id ? `/api/auth-instances/${encodeURIComponent(id)}` : "/api/auth-instances", {
+    request<AdminAuthInstance>(id ? `/api/auth-instances/${encodeURIComponent(id)}` : "/api/auth-instances", {
       method: id ? "PATCH" : "POST",
+      body,
+    }),
+  checkAuthInstance: (body: unknown, id = "") =>
+    request<any>(id ? `/api/auth-instances/${encodeURIComponent(id)}/check` : "/api/auth-instances/check", {
+      method: "POST",
       body,
     }),
   testAuthInstance: (id: string) =>
@@ -88,30 +114,26 @@ export const api = {
     }),
   createIntegration: (body: { providerId: string; name: string }) =>
     request<Integration>("/api/integrations", { method: "POST", body }),
-  connections: () => request<any[]>("/api/connections", { allPages: true }),
+  connections: () => request<AdminConnection[]>("/api/connections", { allPages: true }),
   saveConnection: (body: {
     integrationId: string;
     name: string;
-    authType?: string;
     credentials: Record<string, unknown>;
-    connectionKey?: string;
-    endUserKey?: string;
+    connectionKey: string;
+    endUserKey: string;
     endUserName?: string;
   }) => {
-    const { authType: _authType, ...values } = body;
-    return request<Connection>("/api/connections", {
-      method: "POST",
-      body: {
-        ...values,
-        connectionKey: values.connectionKey ?? values.name,
-        endUserKey: values.endUserKey ?? "default",
-      },
-    });
+    return request<AdminConnection>("/api/connections", { method: "POST", body });
   },
   updateConnection: (id: string, body: unknown) =>
-    request<any>(`/api/connections/${encodeURIComponent(id)}`, { method: "PATCH", body }),
-  verifyConnection: (id: string) =>
-    request<any>(`/api/connections/${encodeURIComponent(id)}/verify`, { method: "POST" }),
+    request<AdminConnection>(`/api/connections/${encodeURIComponent(id)}`, { method: "PATCH", body }),
+  setConnectionEnabled: (id: string, revision: number, enabled: boolean) =>
+    request<any>(`/api/connections/${encodeURIComponent(id)}/enabled`, { method: "POST", body: { revision, enabled } }),
+  verifyConnection: (id: string, body?: unknown) =>
+    request<{ verified: boolean; connection: AdminConnection }>(`/api/connections/${encodeURIComponent(id)}/verify`, {
+      method: "POST",
+      body,
+    }),
   oauthStart: (body: unknown) => request<{ authorizationUrl: string }>("/api/oauth/start", { method: "POST", body }),
   actions: () => request<any[]>("/api/actions", { allPages: true }),
   saveAction: (body: unknown, id = "") =>
@@ -119,6 +141,10 @@ export const api = {
       method: id ? "PATCH" : "POST",
       body,
     }),
+  previewAction: (id: string, body: unknown) =>
+    request<any>(`/api/actions/${encodeURIComponent(id)}/preview`, { method: "POST", body }),
+  actionExecutionOptions: (id: string) => request<any[]>(`/api/actions/${encodeURIComponent(id)}/execution-options`),
+  action: (id: string) => request<any>(`/api/actions/${encodeURIComponent(id)}`),
   testAction: (id: string, body: unknown) =>
     request<any>(`/api/actions/${encodeURIComponent(id)}/test`, { method: "POST", body }),
   syncTasks: () => request<any[]>("/api/sync-tasks"),
@@ -132,6 +158,18 @@ export const api = {
   syncRecords: (id: string, cursor = "") => fetchPage(`/api/sync-tasks/${encodeURIComponent(id)}/records`, {}, cursor),
   runSyncTask: (id: string) => request<any>(`/api/sync-tasks/${encodeURIComponent(id)}/run`, { method: "POST" }),
   deleteSyncTask: (id: string) => request<void>(`/api/sync-tasks/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  workflows: () => request<any[]>("/api/workflows"),
+  saveWorkflow: (body: unknown, id = "", version = 0) =>
+    request<any>(id ? `/api/workflows/${encodeURIComponent(id)}` : "/api/workflows", {
+      method: id ? "PATCH" : "POST",
+      body: { ...(body as Record<string, unknown>), version },
+    }),
+  deployWorkflow: (id: string) => request<any>(`/api/workflows/${encodeURIComponent(id)}/deploy`, { method: "POST" }),
+  pauseWorkflow: (id: string) => request<any>(`/api/workflows/${encodeURIComponent(id)}/pause`, { method: "POST" }),
+  runWorkflow: (id: string, input?: Record<string, unknown>) =>
+    request<any>(`/api/workflows/${encodeURIComponent(id)}/run`, { method: "POST", body: input ? { input } : {} }),
+  workflowRunResult: (id: string) => request<any>(`/api/workflow-runs/${encodeURIComponent(id)}/result`),
+  deleteWorkflow: (id: string) => request<void>(`/api/workflows/${encodeURIComponent(id)}`, { method: "DELETE" }),
   webhookEndpoints: () => request<any[]>("/api/webhook-endpoints"),
   saveWebhookEndpoint: (body: unknown, id = "") =>
     request<any>(id ? `/api/webhook-endpoints/${encodeURIComponent(id)}` : "/api/webhook-endpoints", {
@@ -220,7 +258,7 @@ async function fetchRequest<T>(path: string, options: RequestOptions = {}): Prom
           code?: string;
           requestId?: string;
           error?: { code?: string; message?: string };
-          meta?: { operationId?: string };
+          meta?: { operationId?: string; outcome?: string };
         }
       | undefined;
     const error = value?.error ?? value;
@@ -233,6 +271,9 @@ async function fetchRequest<T>(path: string, options: RequestOptions = {}): Prom
       requestId,
       value?.meta?.operationId,
       (error as { message?: string })?.message,
+      (payload as { details?: unknown })?.details,
+      value?.meta?.outcome,
+      value?.meta,
     );
   }
   if (response.status === 204) return undefined as T;
@@ -271,6 +312,26 @@ function localizedError(payload: unknown): string | undefined {
         ? value.errorCode
         : "";
   const messages: Record<string, [string, string]> = {
+    api_key_exists: ["此系统中已存在相同 API 标识，请更换标识", "This system already has an API with this key"],
+    version_required: ["请先刷新请求预览，再执行调用", "Refresh the request preview before executing"],
+    configuration_changed: [
+      "配置已变化，请刷新请求预览并确认地址",
+      "Configuration changed; refresh the preview and confirm the URL",
+    ],
+    account_verification_required: [
+      "账号尚未在当前地址完成验证，请先前往账号管理验证",
+      "Verify the account on the current target URL first",
+    ],
+    account_disabled: ["账号已停用，请先启用", "Enable this account first"],
+    response_check_failed: [
+      "上游响应检查失败，请查看业务条件或响应结构",
+      "Upstream response checks failed; check business conditions and response structure",
+    ],
+
+    connection_name_exists: [
+      "该集成中已存在同名账号，请更换账号名称，或打开已有账号重试验证",
+      "An account with this name already exists in this integration. Choose another name or retry verification on the existing account",
+    ],
     conflict: ["配置已改变或资源正在使用，请刷新后重试", "The resource changed or is in use. Refresh and try again"],
     internal_error: [
       "服务暂时无法完成此请求，请用请求 ID 排查",
@@ -281,8 +342,8 @@ function localizedError(payload: unknown): string | undefined {
       "Check required fields, JSON and input constraints",
     ],
     provider_request_failed: [
-      "未能确认上游调用结果，请查看运行详情并核对上游",
-      "The upstream outcome is unknown. Check the run and verify upstream",
+      "上游请求失败，请查看实际地址和运行详情",
+      "Upstream request failed. Check the target URL and run details",
     ],
     connection_verification_failed: [
       "连接验证失败，请检查凭据、验证路径和上游服务",
@@ -304,7 +365,17 @@ function localizedError(payload: unknown): string | undefined {
     login_unavailable: ["登录服务暂时不可用，请稍后重试", "Sign-in is temporarily unavailable. Please try again later"],
     rate_limited: ["请求过于频繁，请稍后重试", "Too many requests. Please try again later"],
   };
-  if (messages[code]) return messages[code][language === "en" ? 1 : 0];
+  const outcome = (payload as { meta?: { outcome?: string } }).meta?.outcome;
+  const localized =
+    code === "provider_request_failed" && outcome === "unknown"
+      ? language === "en"
+        ? "The upstream outcome is unknown. Check the run before retrying"
+        : "上游调用结果未知，请核对运行详情与上游后再决定是否重试"
+      : messages[code]?.[language === "en" ? 1 : 0];
+  if (localized) {
+    const detail = typeof value.message === "string" && value.message !== localized ? value.message : "";
+    return detail ? `${localized}（${detail}）` : localized;
+  }
   return typeof value.message === "string" ? value.message : undefined;
 }
 

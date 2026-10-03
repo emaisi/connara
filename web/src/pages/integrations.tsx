@@ -1,18 +1,17 @@
 import { EmptyState, MutationForm } from "../ui";
 import { useCanWrite } from "../permissions";
-import { ArrowRight, Plus, ShieldCheck } from "lucide-react";
+import { Plus, ShieldCheck } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router";
+import { Link, useSearchParams } from "react-router";
 import { statusLabel, useDemo } from "../demo";
 import { Badge, Button, Card, Field, Modal, PageHeader, fieldClass } from "../ui";
 import { api } from "../api";
 
-import { authInstancesFor, authTemplateName, authInstanceName, BuildFlow, Tabs, Logo, KeyValues } from "./core-shared";
+import { authInstancesFor, authTemplateName, authInstanceName, Tabs, Logo, KeyValues } from "./core-shared";
 export function DemoIntegrationsPage() {
   const demo = useDemo();
   const canWrite = useCanWrite();
-  const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const systems = demo.customSystems;
   const draft = (() => {
     try {
@@ -39,9 +38,12 @@ export function DemoIntegrationsPage() {
       demo.authInstances,
       demo.authSchemes,
       true,
+      demo.supportedAuthFlows,
     )[0]?.id ?? "",
   );
   const [name, setName] = useState(draft?.name ?? "");
+  const [environment, setEnvironment] = useState("test");
+  const [selectedEnvironment, setSelectedEnvironment] = useState("test");
   const [query, setQuery] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
   const [baseUrl, setBaseUrl] = useState(draft?.baseUrl ?? "");
@@ -54,11 +56,24 @@ export function DemoIntegrationsPage() {
     demo.authInstances,
     demo.authSchemes,
     true,
+    demo.supportedAuthFlows,
   );
   useEffect(() => {
     if (!provider && systems[0]) setProvider(systems[0].service);
     if (!authInstanceId && availableAuthInstances[0]) setAuthInstanceId(availableAuthInstances[0].id);
   }, [provider, authInstanceId, systems, availableAuthInstances]);
+  useEffect(() => {
+    const id = searchParams.get("integration");
+    if (!id || selected) return;
+    const i = demo.integrations.find((row) => row.id === id);
+    if (i) {
+      setSelected(i);
+      setSelectedAuthDraft(i.authInstanceId);
+      setSelectedBaseUrlDraft(i.baseUrl);
+      setSelectedStatusDraft(i.status);
+      setSelectedEnvironment(String(i.settings?.environment ?? "custom"));
+    }
+  }, [demo.integrations, searchParams, selected]);
   const selectedHasConnections = Boolean(
     selected && demo.connections.some((connection) => connection.integration === selected.name),
   );
@@ -74,14 +89,21 @@ export function DemoIntegrationsPage() {
           authInstanceId: selectedAuthDraft,
           baseUrl: selectedBaseUrlDraft,
           status: selectedStatusDraft,
-          settings: selected.settings ?? {},
+          settings: { ...selected.settings, environment: selectedEnvironment },
+          version: selected.version,
         },
         selected.id,
       )
-      .then(() => demo.reload())
-      .then(() => {
+      .then(async (saved) => {
+        await demo.reload();
+        return saved;
+      })
+      .then((saved) => {
         setSelected({
           ...selected,
+          version: saved.version,
+          targetVersion: saved.targetVersion,
+          settings: { ...selected.settings, environment: selectedEnvironment },
           authInstanceId: selectedAuthDraft,
           baseUrl: selectedBaseUrlDraft,
           status: selectedStatusDraft,
@@ -95,18 +117,26 @@ export function DemoIntegrationsPage() {
     const selectedProvider = systems.find((item) => item.service === provider);
     const integrationName = name || `${provider}-demo`;
     if (!authInstanceId) return;
-    if (!(await demo.addIntegration(provider, integrationName, authInstanceId, selectedProvider?.name, baseUrl)))
-      return;
+    await api.saveIntegration({
+      integrationKey: integrationName,
+      name: integrationName,
+      systemId: selectedProvider?.id,
+      authInstanceId,
+      baseUrl,
+      status: "ready",
+      settings: { environment },
+    });
+    await demo.reload();
+    demo.notify("集成配置已保存");
     setOpen(false);
     sessionStorage.removeItem("apihub.integration-draft");
     setName("");
-    navigate(`/connections?new=1&integration=${encodeURIComponent(integrationName)}`);
   }
   return (
     <div className="grid gap-6">
       <PageHeader
         title="集成配置"
-        description="为系统配置 API 地址并选择兼容的认证实例；真实账号凭据在连接账号中保存。"
+        description="管理 API 地址和认证实例绑定。"
         actions={
           <Button write onClick={() => setOpen(true)}>
             <Plus className="size-4" />
@@ -114,7 +144,7 @@ export function DemoIntegrationsPage() {
           </Button>
         }
       />
-      <BuildFlow current="integrations" />
+
       {!demo.integrations.length && (
         <EmptyState
           title="尚未创建集成"
@@ -161,6 +191,7 @@ export function DemoIntegrationsPage() {
               className="text-left"
               onClick={() => {
                 setSelected(integration);
+                setSelectedEnvironment(String(integration.settings?.environment ?? "custom"));
                 setSelectedAuthDraft(integration.authInstanceId);
                 setSelectedBaseUrlDraft(integration.baseUrl);
                 setSelectedStatusDraft(integration.status);
@@ -184,9 +215,17 @@ export function DemoIntegrationsPage() {
                 <p className="mt-1 text-sm text-[var(--muted-text)]">
                   {integration.displayName} · {authInstanceName(integration.authInstanceId, demo.authInstances)}
                 </p>
+                <p className="mt-2 break-all text-xs text-[var(--muted-text)]">{integration.baseUrl}</p>
+                <Badge>
+                  {integration.settings?.environment === "production"
+                    ? "生产"
+                    : integration.settings?.environment === "test"
+                      ? "测试"
+                      : "自定义环境"}
+                </Badge>
                 <div className="mt-5 grid grid-cols-2 gap-3 border-t border-[var(--border)] pt-4 text-xs">
                   <span className="text-[var(--muted-text)]">
-                    连接账号
+                    账号
                     <strong className="ml-1 text-[var(--text)]">
                       {demo.connections.filter((item) => item.integration === integration.name).length}
                     </strong>
@@ -201,7 +240,7 @@ export function DemoIntegrationsPage() {
         open={open}
         onOpenChange={setOpen}
         title="新建集成"
-        description="选择系统与该系统已绑定的认证实例，然后继续创建测试连接。"
+        description="选择系统、API 基础地址与该系统已绑定的认证实例。"
       >
         <MutationForm className="grid gap-4" onSubmit={submit}>
           <Field label="系统">
@@ -212,7 +251,8 @@ export function DemoIntegrationsPage() {
                 const nextProvider = systems.find((item) => item.service === event.target.value);
                 setProvider(event.target.value);
                 setAuthInstanceId(
-                  authInstancesFor(nextProvider, demo.authInstances, demo.authSchemes, true)[0]?.id ?? "",
+                  authInstancesFor(nextProvider, demo.authInstances, demo.authSchemes, true, demo.supportedAuthFlows)[0]
+                    ?.id ?? "",
                 );
               }}
             >
@@ -221,6 +261,13 @@ export function DemoIntegrationsPage() {
                   {item.name}
                 </option>
               ))}
+            </select>
+          </Field>
+          <Field label="环境标签">
+            <select className={fieldClass} value={environment} onChange={(e) => setEnvironment(e.target.value)}>
+              <option value="test">测试</option>
+              <option value="production">生产</option>
+              <option value="custom">自定义</option>
             </select>
           </Field>
           <Field label="API 基础地址" hint="操作只能访问这个地址下的相对路径。">
@@ -261,7 +308,7 @@ export function DemoIntegrationsPage() {
             />
           </Field>
           <Link className="text-sm font-semibold text-blue-600 hover:underline" to="/providers">
-            找不到目标系统？添加企业内部系统
+            找不到目标系统？添加系统
           </Link>
           <Link
             className="text-sm font-semibold text-blue-600 hover:underline"
@@ -278,14 +325,28 @@ export function DemoIntegrationsPage() {
               取消
             </Button>
             <Button write disabled={!authInstanceId}>
-              创建并继续连接 <ArrowRight className="size-4" />
+              创建集成
             </Button>
           </div>
         </MutationForm>
       </Modal>
       <Modal
         open={Boolean(selected)}
-        onOpenChange={(value) => !value && setSelected(null)}
+        unsavedChanges={Boolean(
+          selected &&
+          (selectedAuthDraft !== selected.authInstanceId ||
+            selectedBaseUrlDraft !== selected.baseUrl ||
+            selectedStatusDraft !== selected.status ||
+            selectedEnvironment !== String(selected.settings?.environment ?? "custom")),
+        )}
+        onOpenChange={(value) => {
+          if (!value) {
+            setSelected(null);
+            const next = new URLSearchParams(searchParams);
+            next.delete("integration");
+            setSearchParams(next);
+          }
+        }}
         title={selected?.name ?? "集成配置"}
         description="查看系统地址并调整该集成使用的认证实例。"
       >
@@ -293,9 +354,27 @@ export function DemoIntegrationsPage() {
           <div className="grid gap-5">
             {selectedHasConnections && (
               <p className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
-                此集成已有连接账号。更换 API 地址或认证实例需要新建集成和替代连接；仅更新账号凭据可到连接详情完成。
+                修改 API 地址后，已有账号需要重新验证；认证实例保持不变。
               </p>
             )}
+            <section className="grid gap-3">
+              <h3 className="font-semibold">账号</h3>
+              {demo.connections
+                .filter((account) => account.integration === selected.name)
+                .map((account) => (
+                  <Link
+                    key={account.id}
+                    className="flex items-center justify-between rounded-lg border border-[var(--border)] p-3 text-sm"
+                    to={`/auth?section=accounts&integration=${encodeURIComponent(selected.name)}&connection=${encodeURIComponent(account.id)}`}
+                  >
+                    <span>{account.name}</span>
+                    <Badge tone={account.status === "active" ? "success" : "warning"}>
+                      {statusLabel(account.status)}
+                    </Badge>
+                  </Link>
+                ))}
+              {!selectedHasConnections && <p className="text-sm text-[var(--muted-text)]">暂无账号</p>}
+            </section>
             <Tabs value={tab} onChange={setTab} items={["概览", "认证"]} />
             {tab === "概览" && (
               <div className="grid gap-4">
@@ -307,11 +386,22 @@ export function DemoIntegrationsPage() {
                     ["最后更新", selected.updatedAt],
                   ]}
                 />
-                <Field label="API 基础地址" hint="只允许 HTTPS；API 操作只能访问此地址下的相对路径。">
+                <Field label="环境标签">
+                  <select
+                    className={fieldClass}
+                    value={selectedEnvironment}
+                    onChange={(e) => setSelectedEnvironment(e.target.value)}
+                  >
+                    <option value="test">测试</option>
+                    <option value="production">生产</option>
+                    <option value="custom">自定义</option>
+                  </select>
+                </Field>
+                <Field label="API 基础地址" hint="支持 HTTP/HTTPS；接口路径会追加到此地址的路径前缀。">
                   <input
                     className={fieldClass}
                     type="url"
-                    disabled={!canWrite || selectedHasConnections}
+                    disabled={!canWrite}
                     value={selectedBaseUrlDraft}
                     onChange={(event) => setSelectedBaseUrlDraft(event.target.value)}
                     required
@@ -366,6 +456,7 @@ export function DemoIntegrationsPage() {
                       demo.authInstances,
                       demo.authSchemes,
                       true,
+                      demo.supportedAuthFlows,
                     ).map((instance) => (
                       <option key={instance.id} value={instance.id}>
                         {instance.name}

@@ -39,6 +39,7 @@ Connara combines a system/action catalog with connection and authentication mana
 | Connected accounts | Save credentials for users, tenants, or service accounts; update credentials; verify access; and distinguish configuration checks from successful upstream verification. Credentials are encrypted with AES-256-GCM. |
 | API actions | Define HTTP methods and relative paths, input/output schemas, and required scopes. Validate input, explicitly select an integration and connection, execute a test, inspect results, and copy a matching cURL command. |
 | Synchronization | Configure manual or scheduled tasks, record extraction, stable record IDs, pagination, and checkpoints. Deploy, pause, resume, inspect stored records, and open the associated run. |
+| Workflows | Compose multiple registered API actions into step chains or DAGs: `{{trigger.*}}` and upstream-alias template mapping (JSON types preserved), restricted `runIf` conditional skips, `onError=continue` failure tolerance with warnings, and a final output mapping. Manual, fixed-interval, and five-field cron (IANA timezone) schedules are supported. Runtime triggers return the mapped output synchronously by default; `?async=1` queues the run for polling with the same token. Triggering pins the graph, inputs, bindings, and action versions — later edits never affect accepted runs. v1 executes serially without automatic retries. |
 | Webhooks | Manage inbound event sources and outbound notification endpoints. Verify/sign events, deduplicate incoming events, retry deliveries, and inspect delivery attempts. |
 | Operations | View calls, sync runs, authentication events, and Webhooks. Filter by integration, connection, status, and time; open run details directly by URL. Unknown upstream outcomes are shown separately. |
 | Access and audit | Issue runtime tokens with explicit action and connection scopes, revoke tokens, search audit history, and export the records currently loaded in the console. |
@@ -47,7 +48,7 @@ Connara combines a system/action catalog with connection and authentication mana
 
 ### Authentication support
 
-Six authentication options can currently be executed directly:
+The built-in executable authentication options include:
 
 - No authentication.
 - API key / Bearer token with configurable injection.
@@ -55,21 +56,22 @@ Six authentication options can currently be executed directly:
 - Username/password exchange for a token.
 - OAuth 2.0 client credentials.
 - OAuth 2.0 authorization code with PKCE and token refresh.
+- mTLS client certificates and per-request AWS SigV4 signing.
+- Directly signed JWTs, JWT Bearer grant, and OAuth 2.0 Token Exchange.
+- Upstream OIDC authorization with ID token verification; OAuth client authentication supports Basic, form secrets, private-key JWT, and client certificates.
 
-The catalog also includes extension templates for OAuth 1.0a, HMAC/AWS SigV4, mTLS, OIDC, JWT service accounts, SAML/token exchange, and Kerberos/NTLM gateways. These require additional implementation or a gateway; a template appearing in the console does not mean its protocol is implemented. Webhook HMAC signing is implemented independently of the HMAC API authentication template.
+OAuth 1.0a, provider-specific HMAC, SAML assertion creation and validation, and Kerberos/NTLM negotiation still require target-specific adapters. Legacy broad HMAC, JWT, and SAML templates do not automatically become executable protocols; the Kerberos/NTLM gateway template only injects an existing gateway token. See the [native authentication development document](docs/native-auth-development-plan.md) for configuration, migration, and acceptance boundaries. Webhook HMAC signing remains separate from API request signing.
 
 ## Console navigation
 
-The sidebar has six main entries. Related pages appear in collapsible groups, with the active page's group opened automatically.
+The sidebar has four main entries. Related pages appear in collapsible groups, with the active page's group opened automatically.
 
 | Main entry | Pages |
 | --- | --- |
 | Overview | Integration totals, recent activity, and setup shortcuts |
-| Integrations | Integration Configurations, Connected Accounts, System Catalog, Authentication Center |
-| API Operations | Action definitions, execution tests, and runtime request examples |
-| Automation | Sync Tasks and Webhook |
-| Operations Center | Run history, details, and metrics |
-| Platform Administration | Access Control, Audit Logs, Team Management, and Platform Settings |
+| Integrations | System Catalog, Authentication Center, Integration Configurations, Connected Accounts |
+| Calls and Runs | API Actions and the Operations Center |
+| More Features | Sync Tasks, Workflows, Webhooks, Access Control, Audit Logs, Team Management, and Platform Settings |
 
 **Quick Start** and **Developer Docs** remain accessible at the bottom of the sidebar. Navigation is shipped with the frontend; there is no separate menu SQL to import.
 
@@ -115,7 +117,7 @@ flowchart LR
 - **PostgreSQL is the durable data store:** configuration, encrypted credentials, sessions, runtime tokens, run history, sync records/checkpoints, jobs, outbox events, and audit history.
 - **Redis holds transient coordination data:** OAuth state/PKCE, rate-limit windows, and distributed token-refresh locks.
 - **The console is embedded with `go:embed`.** A production installation does not need a separate Node.js server or Vite process.
-- **`APIHUB_ROLE=all` runs HTTP, worker, and scheduler together.** Additional roles allow separating background processing when needed.
+- **`APIHUB_ROLE=all` runs HTTP, bounded sync/Webhook worker pools, and scheduler together.** Additional roles allow separating background processing when needed.
 
 The stack uses Go/Chi, pgx/PostgreSQL, go-redis, React, TypeScript, Vite, Tailwind CSS, and TanStack Query. This is a new Go implementation, not a drop-in replacement for OpenConnector or Nango.
 
@@ -236,6 +238,21 @@ unset APIHUB_RUNTIME_TOKEN
 
 Replace both identifiers with values from your console. Runtime tokens and administrator login sessions are separate credentials. Runtime callers can supply `Idempotency-Key`; reuse it only for retries of the same request.
 
+Deployed workflows are invoked through the same runtime plane. Discovery returns only the compositions the token is allowed to call, and a synchronous trigger returns the output mapping configured at deploy time:
+
+```bash
+curl --fail-with-body 'http://127.0.0.1:8080/v1/workflows' \
+  --header "Authorization: Bearer ${APIHUB_RUNTIME_TOKEN}"
+curl --fail-with-body --request POST \
+  'http://127.0.0.1:8080/v1/workflows/order-flow' \
+  --header "Authorization: Bearer ${APIHUB_RUNTIME_TOKEN}" \
+  --header 'Content-Type: application/json' \
+  --data '{"input":{"customerId":"C-1"}}'
+# For long-running compositions use ?async=1: the POST returns 202 with an
+# operationId, then poll GET /v1/workflow-runs/{operationId} for status and
+# the final output.
+```
+
 ## Configuration
 
 The public project name is **Connara**. The initial release retains the `apihub` binary names, `APIHUB_*` environment variables, Go module name, and existing database schema for compatibility with earlier local installations.
@@ -254,7 +271,9 @@ The public project name is **Connara**. The initial release retains the `apihub`
 | `APIHUB_ADMIN_EMAIL`, `APIHUB_ADMIN_PASSWORD_HASH` | First-run administrator identity and bcrypt hash. Editing them after bootstrap does not reset an existing account. |
 | `APIHUB_WORKSPACE_ID`, `APIHUB_WORKSPACE_SLUG`, `APIHUB_WORKSPACE_NAME` | Workspace identity and initial display settings. |
 | `APIHUB_ROLE` | `all` (default), `api`, `worker`, or `scheduler`. |
-| `APIHUB_ALLOWED_PRIVATE_CIDRS` | Explicit private networks that upstream HTTP requests may reach, separated by commas. |
+| `APIHUB_SYNC_WORKERS`, `APIHUB_WEBHOOK_WORKERS` | Bounded worker counts; defaults to `1` sync worker and `3` Webhook workers for `all`/`worker`. |
+| `APIHUB_DB_MAX_CONNS`, `APIHUB_DB_MIN_CONNS` | Optional PostgreSQL pool override. Defaults are role-aware; budget the total across all instances. |
+| `APIHUB_ALLOWED_PRIVATE_CIDRS` | Additional private networks that upstream HTTP requests may reach, separated by commas. Authentication token/refresh endpoints and OIDC issuer origins are authorized directly by their instance configuration. |
 | `APIHUB_CATALOG_DIR` | Optional JSON provider catalog directory; set before first initialization to seed additional catalog entries. |
 | `APIHUB_ENV_FILE` | Alternate configuration file path read by the shell scripts. |
 
@@ -320,7 +339,7 @@ For a public site, terminate HTTPS at your reverse proxy, forward requests to Co
 | `schema version ... unsupported` | Run the new version's `scripts/init.sh` with migration privileges before starting it. |
 | Readiness reports `component: redis` | Check Redis address/password and connectivity. The UI may be reachable while OAuth state, locks, and rate-limited requests remain unavailable. |
 | Port 5173 returns API errors | Vite is a development server; start the Go backend on 8080 as well. |
-| Internal API address is rejected | Add only the required network or host CIDR to `APIHUB_ALLOWED_PRIVATE_CIDRS`, such as `10.20.0.0/16`. |
+| Internal API address is rejected | Authentication token/refresh endpoints and OIDC issuer origins need no extra network setting. For other internal upstream requests, add only the required network or host CIDR to `APIHUB_ALLOWED_PRIVATE_CIDRS`, such as `10.20.0.0/16`. |
 | A connection says configured but not verified | Supply an upstream verification path or execute an Action; saved configuration alone is not an upstream success. |
 | The console shows old assets | Rebuild the frontend **and** Go binary, then restart. The binary embeds its frontend. |
 | A run has an unknown outcome | The upstream operation may have happened. Check the provider before retrying a request with side effects. |

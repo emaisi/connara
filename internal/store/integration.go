@@ -12,11 +12,11 @@ import (
 )
 
 func (s *Store) ListIntegrations(ctx context.Context) ([]model.Integration, error) {
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.database(ctx).Query(ctx, `
 		SELECT i.id::text, i.workspace_id::text, i.integration_key, i.name,
 		       i.system_id::text, s.system_key, s.name,
 		       i.auth_instance_id::text, ai.name, i.base_url, i.status,
-		       i.settings, i.version, i.created_at, i.updated_at
+		       i.settings, i.version, i.created_at, i.updated_at, i.target_version,(SELECT flow_type FROM auth_templates WHERE id=ai.auth_template_id)
 		FROM integrations i
 		JOIN systems s ON s.id = i.system_id AND s.workspace_id = i.workspace_id
 		JOIN auth_instances ai ON ai.id = i.auth_instance_id AND ai.workspace_id = i.workspace_id
@@ -38,11 +38,11 @@ func (s *Store) ListIntegrations(ctx context.Context) ([]model.Integration, erro
 }
 
 func (s *Store) Integration(ctx context.Context, idOrKey string) (model.Integration, error) {
-	item, err := scanIntegration(s.pool.QueryRow(ctx, `
+	item, err := scanIntegration(s.database(ctx).QueryRow(ctx, `
 		SELECT i.id::text, i.workspace_id::text, i.integration_key, i.name,
 		       i.system_id::text, s.system_key, s.name,
 		       i.auth_instance_id::text, ai.name, i.base_url, i.status,
-		       i.settings, i.version, i.created_at, i.updated_at
+		       i.settings, i.version, i.created_at, i.updated_at, i.target_version,(SELECT flow_type FROM auth_templates WHERE id=ai.auth_template_id)
 		FROM integrations i
 		JOIN systems s ON s.id = i.system_id AND s.workspace_id = i.workspace_id
 		JOIN auth_instances ai ON ai.id = i.auth_instance_id AND ai.workspace_id = i.workspace_id
@@ -56,11 +56,11 @@ func (s *Store) IntegrationForSystem(ctx context.Context, systemKey, idOrKey str
 		SELECT i.id::text, i.workspace_id::text, i.integration_key, i.name,
 		       i.system_id::text, s.system_key, s.name,
 		       i.auth_instance_id::text, ai.name, i.base_url, i.status,
-		       i.settings, i.version, i.created_at, i.updated_at
+		       i.settings, i.version, i.created_at, i.updated_at, i.target_version,(SELECT flow_type FROM auth_templates WHERE id=ai.auth_template_id)
 		FROM integrations i
 		JOIN systems s ON s.id = i.system_id AND s.workspace_id = i.workspace_id
 		JOIN auth_instances ai ON ai.id = i.auth_instance_id AND ai.workspace_id = i.workspace_id
-		WHERE i.workspace_id = $1 AND i.deleted_at IS NULL AND i.status = 'ready'
+		WHERE i.workspace_id = $1 AND i.deleted_at IS NULL AND i.status = 'ready' AND s.status='active' AND s.deleted_at IS NULL AND ai.status='ready' AND ai.deleted_at IS NULL
 		  AND s.system_key = $2`
 	args := []any{s.workspaceID, systemKey}
 	if idOrKey != "" {
@@ -68,7 +68,7 @@ func (s *Store) IntegrationForSystem(ctx context.Context, systemKey, idOrKey str
 		args = append(args, idOrKey)
 	}
 	query += ` ORDER BY i.created_at, i.id LIMIT 1`
-	item, err := scanIntegration(s.pool.QueryRow(ctx, query, args...))
+	item, err := scanIntegration(s.database(ctx).QueryRow(ctx, query, args...))
 	return item, mapNotFound(err)
 }
 
@@ -78,7 +78,7 @@ func scanIntegration(row rowScanner) (model.Integration, error) {
 		&item.ID, &item.WorkspaceID, &item.IntegrationKey, &item.Name,
 		&item.SystemID, &item.SystemKey, &item.SystemName,
 		&item.AuthInstanceID, &item.AuthName, &item.BaseURL, &item.Status,
-		&item.Settings, &item.Version, &item.CreatedAt, &item.UpdatedAt,
+		&item.Settings, &item.Version, &item.CreatedAt, &item.UpdatedAt, &item.TargetVersion, &item.AuthFlow,
 	)
 	return item, err
 }
@@ -90,20 +90,24 @@ func (s *Store) SaveIntegration(ctx context.Context, item model.Integration) (mo
 	if item.Status == "" {
 		item.Status = "draft"
 	}
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	err := s.withTx(ctx, func(tx pgx.Tx) error {
 
 		var oldAuth, oldSystem, oldBase string
-		loadErr := tx.QueryRow(ctx, `SELECT auth_instance_id::text,system_id::text,base_url FROM integrations WHERE workspace_id=$1 AND id=$2 FOR UPDATE`, s.workspaceID, item.ID).Scan(&oldAuth, &oldSystem, &oldBase)
+		var oldVersion int64
+		loadErr := tx.QueryRow(ctx, `SELECT auth_instance_id::text,system_id::text,base_url,version FROM integrations WHERE workspace_id=$1 AND id=$2 FOR UPDATE`, s.workspaceID, item.ID).Scan(&oldAuth, &oldSystem, &oldBase, &oldVersion)
 		if loadErr != nil && !errors.Is(loadErr, pgx.ErrNoRows) {
 			return loadErr
 		}
-		if loadErr == nil && (oldAuth != item.AuthInstanceID || oldSystem != item.SystemID || oldBase != strings.TrimRight(item.BaseURL, "/")) {
+		if loadErr == nil && item.Version != oldVersion {
+			return ErrConflict
+		}
+		if loadErr == nil && (oldAuth != item.AuthInstanceID || oldSystem != item.SystemID) {
 			var used bool
 			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM connections WHERE workspace_id=$1 AND integration_id=$2 AND deleted_at IS NULL)`, s.workspaceID, item.ID).Scan(&used); err != nil {
 				return err
 			}
 			if used {
-				return fmt.Errorf("%w: create a new integration to change the target or authentication of existing connections", ErrConflict)
+				return fmt.Errorf("%w: authentication cannot change while accounts exist; configure a new integration", ErrConflict)
 			}
 		}
 		var authSystemID, authStatus string
@@ -128,10 +132,17 @@ func (s *Store) SaveIntegration(ctx context.Context, item model.Integration) (mo
 				integration_key = EXCLUDED.integration_key, name = EXCLUDED.name,
 				system_id = EXCLUDED.system_id, auth_instance_id = EXCLUDED.auth_instance_id,
 				base_url = EXCLUDED.base_url, status = EXCLUDED.status,
-				settings = EXCLUDED.settings, version = integrations.version + 1, updated_at = now()
+				settings = EXCLUDED.settings, version = integrations.version + 1,
+ target_version=integrations.target_version+CASE WHEN integrations.base_url<>EXCLUDED.base_url OR integrations.auth_instance_id<>EXCLUDED.auth_instance_id THEN 1 ELSE 0 END, updated_at = now()
 			WHERE integrations.workspace_id = EXCLUDED.workspace_id`,
 			item.ID, s.workspaceID, item.IntegrationKey, item.Name, item.SystemID,
 			item.AuthInstanceID, strings.TrimRight(item.BaseURL, "/"), item.Status, jsonOrObject(item.Settings))
+		if err != nil {
+			return err
+		}
+		if loadErr == nil && oldBase != strings.TrimRight(item.BaseURL, "/") {
+			_, err = tx.Exec(ctx, `UPDATE connections SET status='pending',last_verified_at=NULL,last_error_code='target_changed',last_error_message='API address changed; verify the account again',updated_at=now() WHERE workspace_id=$1 AND integration_id=$2 AND deleted_at IS NULL`, s.workspaceID, item.ID)
+		}
 		return err
 	})
 	if err != nil {
@@ -142,12 +153,13 @@ func (s *Store) SaveIntegration(ctx context.Context, item model.Integration) (mo
 
 func (s *Store) ListConnections(ctx context.Context, options ...ListOptions) ([]model.Connection, error) {
 	o := listOptions(options)
-	rows, err := s.pool.Query(ctx, connectionSelect+`
+	rows, err := s.database(ctx).Query(ctx, connectionSelect+`
 		WHERE c.workspace_id = $1 AND c.deleted_at IS NULL
 		AND ($2='' OR (c.updated_at,c.id)<($3,NULLIF($2,'')::uuid))
  AND ($4='' OR c.connection_key ILIKE '%'||$4||'%' OR c.name ILIKE '%'||$4||'%' OR eu.external_key ILIKE '%'||$4||'%')
- AND ($5='' OR c.status=$5)
- ORDER BY c.updated_at DESC, c.id DESC LIMIT $6`, s.workspaceID, o.ID, o.Before, o.Query, o.Status, o.Limit)
+ AND ($5='' OR ($5='disabled' AND NOT c.enabled) OR ($5<>'disabled' AND c.enabled AND c.status=$5))
+ AND ($7='' OR c.integration_id::text=$7) AND ($8='' OR s.system_key=$8)
+ ORDER BY c.updated_at DESC, c.id DESC LIMIT $6`, s.workspaceID, o.ID, o.Before, o.Query, o.Status, o.Limit, o.IntegrationID, o.SystemKey)
 	if err != nil {
 		return nil, err
 	}
@@ -170,14 +182,14 @@ const connectionSelect = `
 	       c.status, c.credential_blob, c.key_version, c.revision,
 	       c.token_expires_at, c.last_verified_at, c.last_used_at,
 	       COALESCE(c.last_error_code, ''), COALESCE(c.last_error_message, ''),
-	       c.tags, c.created_at, c.updated_at
+	       c.tags, c.created_at, c.updated_at, c.verified_target_version,c.verified_revision,c.enabled
 	FROM connections c
 	JOIN integrations i ON i.id = c.integration_id AND i.workspace_id = c.workspace_id
 	JOIN systems s ON s.id = i.system_id AND s.workspace_id = c.workspace_id
 	JOIN end_users eu ON eu.id = c.end_user_id AND eu.workspace_id = c.workspace_id`
 
 func (s *Store) Connection(ctx context.Context, idOrKey string) (model.Connection, error) {
-	item, err := scanConnection(s.pool.QueryRow(ctx, connectionSelect+`
+	item, err := scanConnection(s.database(ctx).QueryRow(ctx, connectionSelect+`
 		WHERE c.workspace_id = $1 AND c.deleted_at IS NULL
 		  AND (c.id::text = $2 OR c.connection_key = $2)`, s.workspaceID, idOrKey))
 	return item, mapNotFound(err)
@@ -185,14 +197,14 @@ func (s *Store) Connection(ctx context.Context, idOrKey string) (model.Connectio
 
 func (s *Store) ConnectionForIntegration(ctx context.Context, integrationID, idOrKey string) (model.Connection, error) {
 	query := connectionSelect + `
-		WHERE c.workspace_id = $1 AND c.integration_id = $2 AND c.deleted_at IS NULL AND c.status = 'active'`
+		WHERE c.workspace_id = $1 AND c.integration_id = $2 AND c.deleted_at IS NULL AND c.enabled AND c.status = 'active' AND c.verified_target_version=i.target_version AND c.verified_revision=c.revision AND c.last_verified_at IS NOT NULL`
 	args := []any{s.workspaceID, integrationID}
 	if idOrKey != "" {
 		query += ` AND (c.id::text = $3 OR c.connection_key = $3 OR c.name = $3)`
 		args = append(args, idOrKey)
 	}
 	query += ` ORDER BY c.created_at, c.id LIMIT 1`
-	item, err := scanConnection(s.pool.QueryRow(ctx, query, args...))
+	item, err := scanConnection(s.database(ctx).QueryRow(ctx, query, args...))
 	return item, mapNotFound(err)
 }
 
@@ -205,7 +217,7 @@ func scanConnection(row rowScanner) (model.Connection, error) {
 		&item.Status, &item.CredentialBlob, &item.KeyVersion, &item.Revision,
 		&item.TokenExpiresAt, &item.LastVerifiedAt, &item.LastUsedAt,
 		&item.LastErrorCode, &item.LastErrorMessage, &item.Tags,
-		&item.CreatedAt, &item.UpdatedAt,
+		&item.CreatedAt, &item.UpdatedAt, &item.VerifiedTargetVersion, &item.VerifiedRevision, &item.Enabled,
 	)
 	return item, err
 }
@@ -228,7 +240,7 @@ func (s *Store) SaveConnection(ctx context.Context, input SaveConnectionInput) (
 	if connection.Status == "" {
 		connection.Status = "active"
 	}
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	err := s.withTx(ctx, func(tx pgx.Tx) error {
 		var integrationAuthID string
 		if err := tx.QueryRow(ctx, `
 			SELECT auth_instance_id::text FROM integrations
@@ -279,7 +291,7 @@ func (s *Store) SaveConnection(ctx context.Context, input SaveConnectionInput) (
 				end_user_id = EXCLUDED.end_user_id, status = EXCLUDED.status,
 				credential_blob = EXCLUDED.credential_blob, key_version = EXCLUDED.key_version,
 				revision = connections.revision + 1, token_expires_at = EXCLUDED.token_expires_at,
-				last_verified_at = EXCLUDED.last_verified_at, tags = EXCLUDED.tags,
+				last_verified_at = EXCLUDED.last_verified_at, verified_target_version=0,verified_revision=0,tags = EXCLUDED.tags,
 				last_error_code = NULL, last_error_message = NULL, updated_at = now()
 			WHERE connections.workspace_id = EXCLUDED.workspace_id`,
 			connection.ID, s.workspaceID, connection.ConnectionKey, connection.Name,
@@ -295,9 +307,9 @@ func (s *Store) SaveConnection(ctx context.Context, input SaveConnectionInput) (
 }
 
 func (s *Store) UpdateConnectionCredential(ctx context.Context, id string, expectedRevision int64, blob []byte, expiresAt *time.Time, keyVersion int16) (model.Connection, error) {
-	command, err := s.pool.Exec(ctx, `
+	command, err := s.database(ctx).Exec(ctx, `
 		UPDATE connections SET credential_blob = $4, token_expires_at = $5, key_version = $6,
-		       revision = revision + 1, status = 'active', last_verified_at = now(),
+		       revision = revision + 1, verified_revision=CASE WHEN verified_revision=revision THEN revision+1 ELSE 0 END,
 		       last_error_code = NULL, last_error_message = NULL, updated_at = now()
 		WHERE workspace_id = $1 AND id = $2 AND revision = $3 AND deleted_at IS NULL`,
 		s.workspaceID, id, expectedRevision, blob, nullTime(expiresAt), keyVersion)
@@ -311,33 +323,69 @@ func (s *Store) UpdateConnectionCredential(ctx context.Context, id string, expec
 }
 
 func (s *Store) MarkConnectionVerified(ctx context.Context, id string) (model.Connection, error) {
-	command, err := s.pool.Exec(ctx, `
-		UPDATE connections SET status='active', last_verified_at=now(),
-		       last_error_code=NULL, last_error_message=NULL, updated_at=now()
-		WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL`, s.workspaceID, id)
+	c, err := s.Connection(ctx, id)
+	if err != nil {
+		return c, err
+	}
+	i, err := s.Integration(ctx, c.IntegrationID)
+	if err != nil {
+		return c, err
+	}
+	return s.MarkConnectionVerifiedVersion(ctx, id, c.Revision, i.TargetVersion)
+}
+func (s *Store) MarkConnectionVerifiedVersion(ctx context.Context, id string, revision, targetVersion int64) (model.Connection, error) {
+	command, err := s.database(ctx).Exec(ctx, `UPDATE connections c SET status='active',last_verified_at=now(),verified_revision=$3,verified_target_version=$4,last_error_code=NULL,last_error_message=NULL,updated_at=now() FROM integrations i WHERE c.workspace_id=$1 AND c.id=$2 AND c.revision=$3 AND c.enabled AND c.integration_id=i.id AND i.workspace_id=c.workspace_id AND i.target_version=$4 AND c.deleted_at IS NULL AND i.deleted_at IS NULL`, s.workspaceID, id, revision, targetVersion)
 	if err != nil {
 		return model.Connection{}, err
 	}
 	if command.RowsAffected() == 0 {
-		return model.Connection{}, ErrNotFound
+		return model.Connection{}, ErrConflict
 	}
 	return s.Connection(ctx, id)
 }
 
 func (s *Store) MarkConnectionUsed(ctx context.Context, id string) {
-	_, _ = s.pool.Exec(ctx, `UPDATE connections SET last_used_at = now() WHERE workspace_id = $1 AND id = $2 AND (last_used_at IS NULL OR last_used_at < now()-interval '1 minute')`, s.workspaceID, id)
+	_, _ = s.database(ctx).Exec(ctx, `UPDATE connections SET last_used_at = now() WHERE workspace_id = $1 AND id = $2 AND (last_used_at IS NULL OR last_used_at < now()-interval '1 minute')`, s.workspaceID, id)
 }
 
 func (s *Store) MarkConnectionError(ctx context.Context, id, code, message string) {
-	_, _ = s.pool.Exec(ctx, `
+	_, _ = s.database(ctx).Exec(ctx, `
 		UPDATE connections SET status = 'error', last_error_code = $3, last_error_message = $4, updated_at = now()
 		WHERE workspace_id = $1 AND id = $2`, s.workspaceID, id, code, message)
 }
 
 func (s *Store) MarkConnectionConfigured(ctx context.Context, id string) (model.Connection, error) {
-	_, err := s.pool.Exec(ctx, `UPDATE connections SET status='active', last_verified_at=NULL,last_error_code=NULL,last_error_message=NULL WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL`, s.workspaceID, id)
+	_, err := s.database(ctx).Exec(ctx, `UPDATE connections SET status='pending',verified_revision=0,verified_target_version=0,last_verified_at=NULL,last_error_code=NULL,last_error_message=NULL WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL`, s.workspaceID, id)
 	if err != nil {
 		return model.Connection{}, err
+	}
+	return s.Connection(ctx, id)
+}
+
+func (s *Store) ConnectionsForTarget(ctx context.Context, id string) ([]model.Connection, error) {
+	rows, err := s.database(ctx).Query(ctx, connectionSelect+` WHERE c.workspace_id=$1 AND c.integration_id=$2 AND c.deleted_at IS NULL ORDER BY c.name,c.id`, s.workspaceID, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []model.Connection{}
+	for rows.Next() {
+		c, err := scanConnection(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, c)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) SetConnectionEnabled(ctx context.Context, id string, revision int64, enabled bool) (model.Connection, error) {
+	result, err := s.database(ctx).Exec(ctx, `UPDATE connections SET enabled=$4,updated_at=now() WHERE workspace_id=$1 AND id=$2 AND revision=$3 AND deleted_at IS NULL`, s.workspaceID, id, revision, enabled)
+	if err != nil {
+		return model.Connection{}, err
+	}
+	if result.RowsAffected() == 0 {
+		return model.Connection{}, ErrConflict
 	}
 	return s.Connection(ctx, id)
 }

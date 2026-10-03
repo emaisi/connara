@@ -19,8 +19,11 @@ cleanup() {
 trap cleanup EXIT INT TERM
 "$pg_bin/initdb" -D "$work_dir/pg" -A trust -U apihub_test --no-locale --encoding=UTF8 >/dev/null
 "$pg_bin/pg_ctl" -D "$work_dir/pg" -l "$work_dir/pg.log" -o "-h 127.0.0.1 -p $pg_port -k $work_dir" start >/dev/null
-redis-server --bind 127.0.0.1 --port "$redis_port" --save '' --appendonly no --daemonize yes --dir "$work_dir" --pidfile "$work_dir/redis.pid" --logfile "$work_dir/redis.log"
+if [[ -z "${APIHUB_TEST_REDIS_ADDR:-}" ]]; then
+  redis-server --bind 127.0.0.1 --port "$redis_port" --save '' --appendonly no --daemonize yes --dir "$work_dir" --pidfile "$work_dir/redis.pid" --logfile "$work_dir/redis.log"
+  APIHUB_TEST_REDIS_ADDR="127.0.0.1:$redis_port"
+fi
 export APIHUB_TEST_DATABASE_URL="postgres://apihub_test@127.0.0.1:$pg_port/postgres?sslmode=disable"
-export APIHUB_TEST_REDIS_ADDR="127.0.0.1:$redis_port"
+export APIHUB_TEST_REDIS_ADDR
 cd "$project_root"
 go test -race -count=1 ./...

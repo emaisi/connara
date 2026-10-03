@@ -1,21 +1,24 @@
 package authn
 
 import (
-	"apihub-go/internal/executor"
-	"apihub-go/internal/jsonutil"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	"apihub-go/internal/buildinfo"
+	"apihub-go/internal/executor"
+	"apihub-go/internal/jsonutil"
 	"apihub-go/internal/model"
 	"apihub-go/internal/rediscache"
 	"apihub-go/internal/secret"
@@ -41,6 +44,12 @@ type Resolved struct {
 	Headers     map[string]string
 	Query       map[string]string
 	Cookies     map[string]string
+	Sign        func(context.Context, *http.Request) error
+	TLS         *tls.Config
+}
+
+func (r Resolved) RequestAuth() executor.RequestAuth {
+	return executor.RequestAuth{Headers: r.Headers, Query: r.Query, Cookies: r.Cookies, Sign: r.Sign, TLS: r.TLS}
 }
 
 type OAuthTokens struct {
@@ -81,6 +90,9 @@ func (s *Service) Resolve(ctx context.Context, connectionID string) (Resolved, e
 }
 
 func (s *Service) ResolveConnection(ctx context.Context, connection model.Connection) (Resolved, error) {
+	if !connection.Enabled {
+		return Resolved{}, errors.New("account is disabled")
+	}
 	credentials, err := s.OpenCredentials(connection)
 	if err != nil {
 		return Resolved{}, err
@@ -99,8 +111,11 @@ func (s *Service) ResolveConnection(ctx context.Context, connection model.Connec
 	if template.Status != "published" {
 		return Resolved{}, fmt.Errorf("authentication template is not published")
 	}
-	if !SupportsFlow(instance.AuthTemplateFlow) {
+	if !SupportsTemplate(instance.AuthTemplateKey, instance.AuthTemplateFlow) {
 		return Resolved{}, fmt.Errorf("authentication flow %q requires a reviewed Go extension or enterprise gateway", instance.AuthTemplateFlow)
+	}
+	if err := ValidateEffectiveConfiguration(instance, template); err != nil {
+		return Resolved{}, err
 	}
 	if needsRefresh(connection, instance.AuthTemplateFlow, credentials) {
 		connection, credentials, err = s.refresh(ctx, connection, instance, credentials)
@@ -118,50 +133,23 @@ func (s *Service) ResolveConnection(ctx context.Context, connection model.Connec
 			credentials["basic_token"] = base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
 		}
 	}
-	headerValue, err := renderTemplate(instance.HeaderValueTemplate, credentials)
+	resolved, err := s.resolveTest(instance, template, credentials)
 	if err != nil {
 		return Resolved{}, err
 	}
-	resolved := Resolved{
-		Connection:  connection,
-		Credentials: credentials,
-		HeaderName:  instance.HeaderName,
-		HeaderValue: headerValue,
-		Headers:     map[string]string{},
-		Query:       map[string]string{},
-		Cookies:     map[string]string{},
-	}
-	if instance.HeaderName != "" {
-		resolved.Headers[instance.HeaderName] = headerValue
-	}
-	var rules []struct {
-		Target   string `json:"target"`
-		Name     string `json:"name"`
-		Template string `json:"template"`
-	}
-	if len(template.InjectionRules) > 0 && jsonutil.Unmarshal(template.InjectionRules, &rules) != nil {
-		return Resolved{}, errors.New("authentication injection rules are invalid")
-	}
-	for _, rule := range rules {
-		value, renderErr := renderTemplate(rule.Template, credentials)
-		if renderErr != nil {
-			return Resolved{}, renderErr
-		}
-		switch rule.Target {
-		case "header":
-			resolved.Headers[rule.Name] = value
-		case "query":
-			resolved.Query[rule.Name] = value
-		case "cookie":
-			resolved.Cookies[rule.Name] = value
-		default:
-			return Resolved{}, fmt.Errorf("unsupported credential placement %q", rule.Target)
-		}
-	}
+	resolved.Connection = connection
 	return resolved, nil
 }
 
 func (s *Service) Verify(ctx context.Context, connectionID string) (model.Connection, error) {
+	connection, err := s.store.Connection(ctx, connectionID)
+	if err != nil {
+		return model.Connection{}, err
+	}
+	integration, err := s.store.Integration(ctx, connection.IntegrationID)
+	if err != nil {
+		return model.Connection{}, err
+	}
 	resolved, err := s.Resolve(ctx, connectionID)
 	if err != nil {
 		return model.Connection{}, err
@@ -176,24 +164,20 @@ func (s *Service) Verify(ctx context.Context, connectionID string) (model.Connec
 	if err := jsonutil.Unmarshal(instance.PublicConfig, &config); err != nil {
 		return model.Connection{}, err
 	}
-	if config.VerificationPath == "" {
+	advanced, err := ParseAuthRequest(instance)
+	if err != nil {
+		return model.Connection{}, err
+	}
+	if config.VerificationPath == "" || (advanced.SchemaVersion == 2 && !advanced.Verification.Enabled) {
 		return s.store.MarkConnectionConfigured(ctx, connectionID)
 	}
 	if err := executor.ValidatePath(config.VerificationPath); err != nil {
 		return model.Connection{}, err
 	}
-	integration, err := s.store.Integration(ctx, resolved.Connection.IntegrationID)
-	if err != nil {
+	if err := s.verifyResolved(ctx, instance, integration.BaseURL, resolved); err != nil {
 		return model.Connection{}, err
 	}
-	result, err := executor.New(s.client).Action(ctx, model.Provider{BaseURL: integration.BaseURL}, model.Action{Runtime: &model.HTTPActionRuntime{Method: "GET", Path: config.VerificationPath}}, map[string]any{}, nil, executor.RequestAuth{Headers: resolved.Headers, Query: resolved.Query, Cookies: resolved.Cookies})
-	if err != nil {
-		return model.Connection{}, err
-	}
-	if result.Status < 200 || result.Status >= 300 {
-		return model.Connection{}, fmt.Errorf("verification endpoint returned HTTP %d", result.Status)
-	}
-	return s.store.MarkConnectionVerified(ctx, connectionID)
+	return s.store.MarkConnectionVerifiedVersion(ctx, connectionID, resolved.Connection.Revision, integration.TargetVersion)
 }
 
 func (s *Service) AuthInstanceSecrets(instance model.AuthInstance) (map[string]any, error) {
@@ -219,14 +203,10 @@ func (s *Service) ExchangeOAuthCode(ctx context.Context, instance model.AuthInst
 	if err != nil {
 		return OAuthTokens{}, err
 	}
-	clientID := firstString(secrets, "clientId", "client_id")
-	clientSecret := firstString(secrets, "clientSecret", "client_secret")
-	if clientID == "" {
-		return OAuthTokens{}, errors.New("OAuth clientId is missing")
-	}
-	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {redirectURI}, "client_id": {clientID}}
-	if clientSecret != "" {
-		form.Set("client_secret", clientSecret)
+	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {redirectURI}}
+	authHeader, err := oauthClientAuth(instance, secrets, form, instance.TokenURL)
+	if err != nil {
+		return OAuthTokens{}, err
 	}
 	if verifier != "" {
 		form.Set("code_verifier", verifier)
@@ -237,8 +217,16 @@ func (s *Service) ExchangeOAuthCode(ctx context.Context, instance model.AuthInst
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	request.Header.Set("User-Agent", "apihub-go/0.2")
-	response, err := s.client.Do(request)
+	request.Header.Set("User-Agent", buildinfo.UserAgent)
+	if authHeader != "" {
+		request.Header.Set("Authorization", authHeader)
+	}
+	client, cleanup, err := s.tokenClient(instance, secrets)
+	if err != nil {
+		return OAuthTokens{}, err
+	}
+	defer cleanup()
+	response, err := client.Do(request)
 	if err != nil {
 		return OAuthTokens{}, fmt.Errorf("OAuth token request failed: %w", err)
 	}
@@ -279,7 +267,6 @@ func (s *Service) ExchangeOAuthCode(ctx context.Context, instance model.AuthInst
 }
 
 func (s *Service) refresh(ctx context.Context, connection model.Connection, instance model.AuthInstance, credentials map[string]any) (model.Connection, map[string]any, error) {
-
 	ctx, cancel := context.WithTimeout(ctx, 40*time.Second)
 	defer cancel()
 	var unlock func(context.Context) error
@@ -320,43 +307,155 @@ func (s *Service) refresh(ctx context.Context, connection model.Connection, inst
 		values, openErr := s.OpenCredentials(current)
 		return current, values, openErr
 	}
+	template, err := s.store.AuthTemplate(ctx, instance.AuthTemplateID)
+	if err != nil {
+		return connection, nil, err
+	}
+	if connection.LastErrorCode == "auth_configuration_changed" && instance.AuthTemplateFlow == "password_token" {
+		credentials = maps.Clone(credentials)
+		delete(credentials, "refresh_token")
+	}
+	return s.requestInstanceToken(ctx, connection, instance, template, credentials, false)
+}
+
+// TestInstanceToken uses the runtime token request without saving test credentials or tokens.
+func (s *Service) TestInstanceToken(ctx context.Context, instance model.AuthInstance, template model.AuthTemplate, credentials map[string]any) error {
+	switch instance.AuthTemplateFlow {
+	case "password_token", "client_credentials", "jwt_bearer_grant", "token_exchange":
+	default:
+		return errors.New("this authentication flow requires a connection account and an API verification endpoint or browser authorization")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 40*time.Second)
+	defer cancel()
+	testCredentials := make(map[string]any, len(credentials))
+	for key, value := range credentials {
+		testCredentials[key] = value
+	}
+	_, values, err := s.requestInstanceToken(ctx, model.Connection{}, instance, template, testCredentials, true)
+	if err != nil {
+		return err
+	}
+	if _, err := renderTemplate(instance.HeaderValueTemplate, values); err != nil {
+		return err
+	}
+	var rules []struct {
+		Template string `json:"template"`
+	}
+	if len(template.InjectionRules) > 0 {
+		if err := jsonutil.Unmarshal(template.InjectionRules, &rules); err != nil {
+			return errors.New("authentication injection rules are invalid")
+		}
+		for _, rule := range rules {
+			if _, err := renderTemplate(rule.Template, values); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Service) requestInstanceToken(ctx context.Context, connection model.Connection, instance model.AuthInstance, template model.AuthTemplate, credentials map[string]any, testOnly bool) (resultConnection model.Connection, resultValues map[string]any, resultError error) {
+	stage := "token_request"
+	defer func() {
+		if resultError != nil {
+			var existing *AuthStageError
+			if !errors.As(resultError, &existing) {
+				resultError = &AuthStageError{Stage: stage, Err: resultError}
+			}
+		}
+	}()
+	copied := make(map[string]any, len(credentials))
+	for key, value := range credentials {
+		copied[key] = value
+	}
+	credentials = copied
 	tokenURL := instance.TokenURL
-	if instance.AuthTemplateFlow == "oauth2_code" && instance.RefreshURL != "" {
+	if (instance.AuthTemplateFlow == "oauth2_code" || instance.AuthTemplateFlow == "oidc") && instance.RefreshURL != "" {
 		tokenURL = instance.RefreshURL
 	}
 	if tokenURL == "" {
 		return connection, nil, errors.New("authentication instance has no token URL")
 	}
-	template, err := s.store.AuthTemplate(ctx, instance.AuthTemplateID)
+	requestConfig, err := EffectiveRequest(instance, template)
 	if err != nil {
 		return connection, nil, err
 	}
-	var requestConfig struct {
-		Method   string `json:"method"`
-		BodyType string `json:"bodyType"`
+	if err := ValidateEffectiveConfiguration(instance, template); err != nil {
+		return connection, nil, err
 	}
-	_ = jsonutil.Unmarshal(template.TokenRequest, &requestConfig)
-	method := strings.ToUpper(requestConfig.Method)
-	if method == "" {
-		method = http.MethodPost
+	advanced, err := ParseAuthRequest(instance)
+	if err != nil {
+		return connection, nil, err
 	}
+	method := requestConfig.Method
 	var body io.Reader
+	var authHeader string
 	contentType := "application/json"
-	if instance.AuthTemplateFlow == "oauth2_code" {
+	values, config, err := s.advancedCredentials(instance, credentials)
+	if err != nil {
+		return connection, nil, err
+	}
+	if instance.AuthTemplateFlow == "oauth2_code" || instance.AuthTemplateFlow == "oidc" {
 		refreshToken := firstString(credentials, "refresh_token", "refreshToken")
 		if refreshToken == "" {
 			return connection, nil, fmt.Errorf("%w: refresh token missing", ErrReauthorization)
 		}
-		secrets, secretErr := s.AuthInstanceSecrets(instance)
-		if secretErr != nil {
-			return connection, nil, secretErr
-		}
 		form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refreshToken}}
-		if clientID := firstString(secrets, "clientId", "client_id"); clientID != "" {
-			form.Set("client_id", clientID)
+		authHeader, err = oauthClientAuth(instance, values, form, tokenURL)
+		if err != nil {
+			return connection, nil, err
 		}
-		if clientSecret := firstString(secrets, "clientSecret", "client_secret"); clientSecret != "" {
-			form.Set("client_secret", clientSecret)
+		body = strings.NewReader(form.Encode())
+		contentType = "application/x-www-form-urlencoded"
+	} else if instance.AuthTemplateFlow == "client_credentials" {
+		form := url.Values{"grant_type": {"client_credentials"}}
+		if config.Scope != "" {
+			form.Set("scope", config.Scope)
+		}
+		authHeader, err = oauthClientAuth(instance, values, form, tokenURL)
+		if err != nil {
+			return connection, nil, err
+		}
+		body = strings.NewReader(form.Encode())
+		contentType = "application/x-www-form-urlencoded"
+	} else if instance.AuthTemplateFlow == "jwt_bearer_grant" {
+		audience := config.Audience
+		if audience == "" {
+			audience = instance.TokenURL
+		}
+		assertion, signErr := signedAssertion(values, config, audience)
+		if signErr != nil {
+			return connection, nil, signErr
+		}
+		form := url.Values{"grant_type": {"urn:ietf:params:oauth:grant-type:jwt-bearer"}, "assertion": {assertion}}
+		if config.Scope != "" {
+			form.Set("scope", config.Scope)
+		}
+		body = strings.NewReader(form.Encode())
+		contentType = "application/x-www-form-urlencoded"
+	} else if instance.AuthTemplateFlow == "token_exchange" {
+		subject := firstString(credentials, "subject_token")
+		if subject == "" || config.SubjectType == "" {
+			return connection, nil, errors.New("subject token and token type are required")
+		}
+		form := url.Values{"grant_type": {"urn:ietf:params:oauth:grant-type:token-exchange"}, "subject_token": {subject}, "subject_token_type": {config.SubjectType}}
+		if config.RequestedType != "" {
+			form.Set("requested_token_type", config.RequestedType)
+		}
+		if config.Audience != "" {
+			form.Set("audience", config.Audience)
+		}
+		if config.Resource != "" {
+			form.Set("resource", config.Resource)
+		}
+		if config.Scope != "" {
+			form.Set("scope", config.Scope)
+		}
+		if firstString(values, "clientId", "client_id") != "" || config.ClientAuth != "" {
+			authHeader, err = oauthClientAuth(instance, values, form, tokenURL)
+			if err != nil {
+				return connection, nil, err
+			}
 		}
 		body = strings.NewReader(form.Encode())
 		contentType = "application/x-www-form-urlencoded"
@@ -392,10 +491,41 @@ func (s *Service) refresh(ctx context.Context, connection model.Connection, inst
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", contentType)
-	request.Header.Set("User-Agent", "apihub-go/0.2")
-	response, err := s.client.Do(request)
+	request.Header.Set("User-Agent", buildinfo.UserAgent)
+	if authHeader != "" {
+		request.Header.Set("Authorization", authHeader)
+	}
+	instanceSecrets, err := s.AuthInstanceSecrets(instance)
 	if err != nil {
-		return connection, nil, fmt.Errorf("token request failed: %w", err)
+		return connection, nil, err
+	}
+	customRefresh := false
+	if instance.AuthTemplateFlow == "password_token" && (requestConfig.SchemaVersion == 2 || advanced.SchemaVersion == 2) {
+		fields, fieldErr := CredentialFields(template)
+		if fieldErr != nil {
+			return connection, nil, fieldErr
+		}
+		if err := ValidateCredentials(template, values); err != nil {
+			return connection, nil, err
+		}
+		if advanced.Refresh.Mode == "refresh_token" && !testOnly && firstString(credentials, "refresh_token") != "" {
+			customRefresh = true
+			requestConfig = *advanced.Refresh.Request
+			tokenURL = instance.RefreshURL
+		}
+		request, err = buildAuthRequest(ctx, tokenURL, requestConfig, fields, credentials, instanceSecrets)
+		if err != nil {
+			return connection, nil, err
+		}
+	}
+	client, cleanup, err := s.tokenClient(instance, values)
+	if err != nil {
+		return connection, nil, err
+	}
+	defer cleanup()
+	response, err := client.Do(request)
+	if err != nil {
+		return connection, nil, safeRequestError(err)
 	}
 	defer response.Body.Close()
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxTokenResponse+1))
@@ -404,6 +534,19 @@ func (s *Service) refresh(ctx context.Context, connection model.Connection, inst
 	}
 	if len(responseBody) > maxTokenResponse {
 		return connection, nil, errors.New("token response exceeds 1 MiB")
+	}
+	if customRefresh && advanced.Refresh.FallbackOnInvalidRefreshToken {
+		var failure any
+		if jsonutil.Unmarshal(responseBody, &failure) == nil && matchesCondition(failure, advanced.Refresh.InvalidRefreshCondition) {
+			// Only the explicitly configured invalid-token result permits one relogin.
+			instanceCopy := instance
+			var public map[string]any
+			_ = jsonutil.Unmarshal(instance.PublicConfig, &public)
+			advanced.Refresh.Mode = "relogin"
+			public["authRequest"] = advanced
+			instanceCopy.PublicConfig, _ = json.Marshal(public)
+			return s.requestInstanceToken(ctx, connection, instanceCopy, template, credentials, testOnly)
+		}
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		var failure struct {
@@ -415,13 +558,31 @@ func (s *Service) refresh(ctx context.Context, connection model.Connection, inst
 		}
 		return connection, nil, fmt.Errorf("token endpoint returned HTTP %d", response.StatusCode)
 	}
+	stage = "token_response"
 	var responseValue any
 	if err := jsonutil.Unmarshal(responseBody, &responseValue); err != nil {
 		return connection, nil, errors.New("token endpoint did not return JSON")
 	}
-	token, ok := lookupJSONPath(responseValue, instance.TokenPath)
-	if !ok || strings.TrimSpace(fmt.Sprint(token)) == "" {
-		return connection, nil, fmt.Errorf("token path %q was not found", instance.TokenPath)
+	if !matchesCondition(responseValue, advanced.Response.SuccessCondition) {
+		return connection, nil, errors.New("authentication response does not satisfy the success condition")
+	}
+	if instance.AuthTemplateFlow == "token_exchange" {
+		responseObject, ok := responseValue.(map[string]any)
+		if !ok || firstString(responseObject, "issued_token_type") == "" {
+			return connection, nil, errors.New("token exchange response has no issued token type")
+		}
+		if config.RequestedType != "" && firstString(responseObject, "issued_token_type") != config.RequestedType {
+			return connection, nil, errors.New("token exchange returned an unexpected token type")
+		}
+	}
+	tokenPath := instance.TokenPath
+	if tokenPath == "" && instance.AuthTemplateFlow != "password_token" {
+		tokenPath = "$.access_token"
+	}
+	tokenValue, ok := lookupJSONPath(responseValue, tokenPath)
+	token, isString := tokenValue.(string)
+	if !ok || !isString || strings.TrimSpace(token) == "" {
+		return connection, nil, fmt.Errorf("token path %q was not found", tokenPath)
 	}
 	credentials["token"] = fmt.Sprint(token)
 	credentials["access_token"] = fmt.Sprint(token)
@@ -431,11 +592,38 @@ func (s *Service) refresh(ctx context.Context, connection model.Connection, inst
 		}
 	}
 	var expiresAt *time.Time
-	if expiry, ok := lookupJSONPath(responseValue, instance.ExpiryPath); ok {
+	expiryPath := instance.ExpiryPath
+	if expiryPath == "" {
+		expiryPath = "$.expires_in"
+	}
+	if expiry, ok := lookupJSONPath(responseValue, expiryPath); ok {
 		if seconds, parseErr := strconv.ParseInt(fmt.Sprint(expiry), 10, 64); parseErr == nil && seconds > 0 {
 			value := time.Now().UTC().Add(time.Duration(seconds) * time.Second)
 			expiresAt = &value
 		}
+	}
+	if advanced.SchemaVersion == 2 && instance.AuthTemplateFlow == "password_token" {
+		expiresAt, err = responseExpiry(responseValue, instance.ExpiryPath, advanced.Response.Expiry, time.Now().UTC())
+		if err != nil {
+			return connection, nil, err
+		}
+		if advanced.Refresh.Mode == "refresh_token" {
+			refresh, exists := lookupJSONPath(responseValue, advanced.Refresh.RefreshTokenPath)
+			if text, ok := refresh.(string); exists && ok && strings.TrimSpace(text) != "" {
+				credentials["refresh_token"] = text
+			} else if !customRefresh {
+				return connection, nil, errors.New("configured refresh token field is missing or empty")
+			}
+		}
+	} else if testOnly && instance.ExpiryPath != "" && expiresAt == nil {
+		return connection, nil, fmt.Errorf("expiry path %q must contain a positive integer in seconds", instance.ExpiryPath)
+	}
+	if testOnly {
+		return connection, credentials, nil
+	}
+	if expiresAt == nil && (instance.AuthTemplateFlow == "token_exchange" || instance.AuthTemplateFlow == "jwt_bearer_grant") {
+		value := time.Now().UTC()
+		expiresAt = &value // Unknown lifetime: exchange again before the next request.
 	}
 	newRevision := connection.Revision + 1
 	blob, err := s.SealCredentials(connection.ID, newRevision, credentials)
@@ -449,8 +637,11 @@ func (s *Service) refresh(ctx context.Context, connection model.Connection, inst
 }
 
 func needsRefresh(connection model.Connection, flow string, credentials map[string]any) bool {
-	if flow != "password_token" && flow != "client_credentials" && flow != "oauth2_code" {
+	if flow != "password_token" && flow != "client_credentials" && flow != "oauth2_code" && flow != "oidc" && flow != "jwt_bearer_grant" && flow != "token_exchange" {
 		return false
+	}
+	if connection.LastErrorCode == "auth_configuration_changed" {
+		return true
 	}
 	if token := firstString(credentials, "token", "access_token", "accessToken"); token == "" {
 		return true
@@ -460,11 +651,24 @@ func needsRefresh(connection model.Connection, flow string, credentials map[stri
 
 func SupportsFlow(flow string) bool {
 	switch flow {
-	case "none", "static", "password_token", "client_credentials", "oauth2_code", "gateway":
+	case "none", "static", "password_token", "client_credentials", "oauth2_code", "gateway", "mtls", "aws_sigv4", "jwt_direct", "jwt_bearer_grant", "token_exchange", "oidc":
 		return true
 	default:
 		return false
 	}
+}
+
+// SupportsTemplate preserves the meaning of legacy built-ins whose broad flow
+// name overlaps with a newly implemented, narrower protocol.
+func SupportsTemplate(key, flow string) bool {
+	if key == "saml-token-exchange" {
+		return false
+	}
+	return SupportsFlow(flow)
+}
+
+func ExecutableFlows() []string {
+	return []string{"none", "static", "password_token", "client_credentials", "oauth2_code", "gateway", "mtls", "aws_sigv4", "jwt_direct", "jwt_bearer_grant", "token_exchange", "oidc"}
 }
 
 func renderTemplate(template string, values map[string]any) (string, error) {
@@ -507,25 +711,7 @@ func firstString(values map[string]any, keys ...string) string {
 	return ""
 }
 
-func lookupJSONPath(value any, path string) (any, bool) {
-	path = strings.TrimSpace(strings.TrimPrefix(path, "$"))
-	path = strings.TrimPrefix(path, ".")
-	if path == "" {
-		return value, true
-	}
-	current := value
-	for _, part := range strings.Split(path, ".") {
-		object, ok := current.(map[string]any)
-		if !ok {
-			return nil, false
-		}
-		current, ok = object[part]
-		if !ok {
-			return nil, false
-		}
-	}
-	return current, true
-}
+func lookupJSONPath(value any, path string) (any, bool) { return jsonutil.PathLookup(value, path) }
 
 func isRuntimeCredential(key string) bool {
 	switch key {

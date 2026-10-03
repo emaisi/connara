@@ -3,61 +3,146 @@ import { useResourcePages, PageControls } from "../pagination";
 
 import { ArrowRight, Plus } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
-import { Link } from "react-router";
-import { useDemo, type DemoSystem } from "../demo";
-import { Badge, Button, Card, Field, Modal, PageHeader, fieldClass } from "../ui";
+import { Link, useNavigate } from "react-router";
+import { DEFAULT_CUSTOM_SYSTEM_DESCRIPTION, systemDescriptionForDisplay, useDemo, type DemoSystem } from "../demo";
+import { useLanguage } from "../i18n";
+import { Badge, Button, Card, Field, Modal, MutationForm, PageHeader, fieldClass } from "../ui";
 import { api } from "../api";
 
-import {
-  authInstancesFor,
-  authMethodCatalog,
-  BuildFlow,
-  SearchBox,
-  Tabs,
-  Logo,
-  MiniStat,
-  ListRow,
-} from "./core-shared";
+import { authInstancesFor, availableAuthMethods, SearchBox, Tabs, Logo, MiniStat, ListRow } from "./core-shared";
 export function DemoProvidersPage() {
   return (
     <div className="grid gap-6">
       <PageHeader
         title="系统目录"
-        description="统一管理内置与自定义系统、系统分组，以及系统可使用的认证实例。"
+        description="统一管理目录系统与自建系统、系统分组，以及系统可使用的认证实例。"
         actions={<Badge tone="info">系统分组 · 认证模板 · 认证实例</Badge>}
       />
-      <BuildFlow current="systems" />
+
       <SystemDirectoryPage />
     </div>
   );
 }
 
+type AuthTemplateOption = { id: string; templateKey: string; name: string; status: string };
+
+function SystemAuthTemplatePicker({
+  name,
+  templates,
+  selectedKeys,
+  defaultKey,
+  inUseKeys = [],
+  disabled = false,
+  onChange,
+}: {
+  name: string;
+  templates: AuthTemplateOption[];
+  selectedKeys: string[];
+  defaultKey: string;
+  inUseKeys?: string[];
+  disabled?: boolean;
+  onChange: (selectedKeys: string[], defaultKey: string) => void;
+}) {
+  const { t } = useLanguage();
+  return (
+    <fieldset className="min-w-0" disabled={disabled}>
+      <legend className="text-sm font-bold">支持的认证模板</legend>
+      <p className="mt-1 text-xs text-[var(--muted-text)]">可选择多个模板，并指定新建认证实例时优先使用的默认模板。</p>
+      <div className="mt-2 grid gap-2 rounded-xl border border-[var(--border)] p-3 sm:grid-cols-2">
+        {templates.map((template) => {
+          const selected = selectedKeys.includes(template.templateKey);
+          const inUse = inUseKeys.includes(template.templateKey);
+          return (
+            <div key={template.id} className="flex min-w-0 flex-wrap items-center justify-between gap-2 text-sm">
+              <label className="flex min-w-0 items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={selected}
+                  disabled={inUse}
+                  onChange={(event) => {
+                    const next = event.target.checked
+                      ? [...selectedKeys, template.templateKey]
+                      : selectedKeys.filter((key) => key !== template.templateKey);
+                    onChange(next, next.includes(defaultKey) ? defaultKey : (next[0] ?? ""));
+                  }}
+                />
+                <span className="min-w-0 break-words">{template.name}</span>
+              </label>
+              <div className="flex items-center gap-2">
+                {inUse && <Badge tone="info">实例使用中</Badge>}
+                <label className="flex items-center gap-1 text-xs text-[var(--muted-text)]">
+                  <input
+                    type="radio"
+                    name={name}
+                    aria-label={`${t("设为默认")}: ${t(template.name)}`}
+                    checked={selected && defaultKey === template.templateKey}
+                    disabled={!selected}
+                    onChange={() => onChange(selectedKeys, template.templateKey)}
+                  />
+                  默认
+                </label>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {inUseKeys.length > 0 && (
+        <p className="mt-2 text-xs text-[var(--muted-text)]">已有认证实例使用的模板不能移除。</p>
+      )}
+    </fieldset>
+  );
+}
+
 function SystemDirectoryPage() {
   const demo = useDemo();
+  const navigate = useNavigate();
+  const { t } = useLanguage();
   const canWrite = useCanWrite();
   const [query, setQuery] = useState("");
   const [scope, setScope] = useState("全部系统");
   const [group, setGroup] = useState("全部分组");
   const [selected, setSelected] = useState<DemoSystem | null>(null);
+  const [detailTab, setDetailTab] = useState("API");
+  const [systemApis, setSystemApis] = useState<any[]>([]);
+  useEffect(() => {
+    setDetailTab("API");
+    setSystemApis([]);
+    if (!selected) return;
+    let cancelled = false;
+    void api
+      .actions()
+      .then((rows) => {
+        if (!cancelled) setSystemApis(rows.filter((row) => row.systemKey === selected.service));
+      })
+      .catch((error) => demo.notify(error));
+    return () => {
+      cancelled = true;
+    };
+  }, [selected]);
+
   const [systemOpen, setSystemOpen] = useState(false);
   const [groupsOpen, setGroupsOpen] = useState(false);
   const [newGroup, setNewGroup] = useState("");
-  const [systemName, setSystemName] = useState("企业 ERP");
+  const [editingGroupId, setEditingGroupId] = useState("");
+  const [editingGroupName, setEditingGroupName] = useState("");
+  const [systemName, setSystemName] = useState("ERP");
   const [systemId, setSystemId] = useState("internal-erp");
-  const [systemGroup, setSystemGroup] = useState("企业内部");
-  const [systemAuthTemplate, setSystemAuthTemplate] = useState("username-password-token");
+  const [systemGroup, setSystemGroup] = useState("内部系统");
+  const [systemTemplateKeys, setSystemTemplateKeys] = useState(["username-password-token"]);
+  const [systemDefaultTemplateKey, setSystemDefaultTemplateKey] = useState("username-password-token");
   const [groupRows, setGroupRows] = useState<Array<{ id: string; name: string; sortOrder: number }>>([]);
   const [templateRows, setTemplateRows] = useState<
-    Array<{ id: string; templateKey: string; name: string; status: string }>
+    Array<{ id: string; templateKey: string; name: string; source: string; status: string }>
   >([]);
   const [selectedTemplateKeys, setSelectedTemplateKeys] = useState<string[]>([]);
+  const [selectedDefaultTemplateKey, setSelectedDefaultTemplateKey] = useState("");
   const [selectedGroupId, setSelectedGroupId] = useState("");
   const systemPage = useResourcePages(
     "/api/systems",
     {
       q: query,
       group: group === "全部分组" ? "" : group,
-      scope: scope === "全部系统" ? "" : scope === "已有连接" ? "connected" : "custom",
+      scope: scope === "已有连接" ? "connected" : scope === "自建系统" ? "custom" : "",
     },
     demo.authenticated,
   );
@@ -72,10 +157,14 @@ function SystemDirectoryPage() {
     actions: item.actionCount,
     executable: item.executableCount,
     connections: item.connectionCount,
-    description: item.description,
+    description: systemDescriptionForDisplay(item.description, item.source),
     authTemplateIds: (item.authTemplateIds ?? []).map(
       (id: string) => templateRows.find((template) => template.id === id)?.templateKey ?? id,
     ),
+    defaultAuthTemplateId:
+      templateRows.find((template) => template.id === item.defaultAuthTemplateId)?.templateKey ??
+      item.defaultAuthTemplateId ??
+      "",
   }));
   function loadCatalogMetadata() {
     return Promise.all([api.systemGroups(), api.authTemplates()]).then(([groups, templates]) => {
@@ -88,21 +177,49 @@ function SystemDirectoryPage() {
     void loadCatalogMetadata().catch((error) => demo.notify(error));
   }, [demo.authenticated, demo.systemGroups.length]);
   const filtered = systems;
+  const selectableTemplates = templateRows.filter(
+    (template) =>
+      template.status === "published" &&
+      (template.source === "custom" || availableAuthMethods.some((method) => method.id === template.templateKey)),
+  );
+  const editTemplates = templateRows.filter(
+    (template) => selectableTemplates.includes(template) || selectedTemplateKeys.includes(template.templateKey),
+  );
+  const originalDefaultTemplateKey = selected?.defaultAuthTemplateId || selected?.authTemplateIds[0] || "";
+  const authSelectionChanged = Boolean(
+    selected &&
+    (selectedDefaultTemplateKey !== originalDefaultTemplateKey ||
+      selectedTemplateKeys.length !== selected.authTemplateIds.length ||
+      selectedTemplateKeys.some((key) => !selected.authTemplateIds.includes(key))),
+  );
+  const systemGroupValue = demo.systemGroups.includes(systemGroup) ? systemGroup : (demo.systemGroups[0] ?? "");
   async function addSystem(event: FormEvent) {
     event.preventDefault();
     const service = systemId.trim();
-    if (!(await demo.addSystem(systemName, service, systemGroup, systemAuthTemplate))) return;
+    if (!(await demo.addSystem(systemName, service, systemGroupValue, systemTemplateKeys, systemDefaultTemplateKey)))
+      return;
     setSystemOpen(false);
+    navigate(`/auth?section=instances&create=1&system=${encodeURIComponent(service)}`);
   }
   function saveSystemSettings() {
-    if (!selected?.id || !selectedGroupId) return;
-    const templateIds = selectedTemplateKeys
-      .map((key) => templateRows.find((item) => item.templateKey === key)?.id)
-      .filter((id): id is string => Boolean(id));
-    void Promise.all([
-      api.updateSystem(selected.id, { groupId: selectedGroupId }),
-      api.setSystemAuthTemplates(selected.id, templateIds),
-    ])
+    if (!selected?.id || !selectedGroupId || !selectedTemplateKeys.includes(selectedDefaultTemplateKey)) return;
+    const changes: Promise<unknown>[] = [];
+    if (selectedGroupId !== (selected.groupId ?? "")) {
+      changes.push(api.updateSystem(selected.id, { groupId: selectedGroupId }));
+    }
+    if (authSelectionChanged) {
+      const templateIds = selectedTemplateKeys
+        .map((key) => templateRows.find((item) => item.templateKey === key)?.id)
+        .filter((id): id is string => Boolean(id));
+      const defaultTemplateId = templateRows.find((item) => item.templateKey === selectedDefaultTemplateKey)?.id;
+      if (!defaultTemplateId || templateIds.length !== selectedTemplateKeys.length) {
+        demo.notify("认证模板尚未加载完成，请稍后重试");
+        return;
+      }
+      changes.push(api.setSystemAuthTemplates(selected.id, templateIds, defaultTemplateId));
+    }
+    if (!changes.length) return;
+    return Promise.all(changes)
       .then(() => demo.reload())
       .then(() => {
         setSelected(null);
@@ -120,9 +237,9 @@ function SystemDirectoryPage() {
           setGroup("全部分组");
         }}
       />
-      <div className="flex flex-col gap-3 xl:flex-row">
+      <div className="flex min-w-0 flex-col gap-3 xl:flex-row">
         <SearchBox value={query} onChange={setQuery} placeholder="搜索系统、标识、认证方式或分类" />
-        <Tabs value={scope} onChange={setScope} items={["全部系统", "已有连接", "企业内部"]} />
+        <Tabs value={scope} onChange={setScope} items={["全部系统", "已有连接", "自建系统"]} />
         <select className={`${fieldClass} xl:w-44`} value={group} onChange={(event) => setGroup(event.target.value)}>
           <option>全部分组</option>
           {demo.systemGroups.map((item) => (
@@ -134,7 +251,7 @@ function SystemDirectoryPage() {
         </Button>
         <Button write className="shrink-0" onClick={() => setSystemOpen(true)}>
           <Plus className="size-4" />
-          添加企业系统
+          添加系统
         </Button>
       </div>
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
@@ -145,6 +262,7 @@ function SystemDirectoryPage() {
             onClick={() => {
               setSelected(provider);
               setSelectedTemplateKeys(provider.authTemplateIds);
+              setSelectedDefaultTemplateKey(provider.defaultAuthTemplateId || provider.authTemplateIds[0] || "");
               setSelectedGroupId(provider.groupId ?? "");
             }}
           >
@@ -162,7 +280,9 @@ function SystemDirectoryPage() {
               </h2>
               <p className="font-mono text-xs text-[var(--muted-text)]">{provider.service}</p>
               <p translate="no" className="mt-3 min-h-10 text-sm leading-5 text-[var(--muted-text)]">
-                {provider.description}
+                {provider.source === "custom" && provider.description === DEFAULT_CUSTOM_SYSTEM_DESCRIPTION
+                  ? t(provider.description)
+                  : provider.description}
               </p>
               <div className="mt-4 flex flex-wrap gap-1.5">
                 {authInstancesFor(provider, demo.authInstances).map((instance) => (
@@ -191,221 +311,317 @@ function SystemDirectoryPage() {
             <div className="grid grid-cols-3 gap-3">
               <MiniStat label="操作" value={selected.actions} />
               <MiniStat label="可执行" value={selected.executable} />
-              <MiniStat label="连接账号" value={selected.connections} />
+              <MiniStat label="账号" value={selected.connections} />
             </div>
-            <Field label="系统分组" hint="仅用于目录筛选和管理，不改变运行时权限。">
-              <select
-                className={fieldClass}
-                disabled={!canWrite}
-                value={selectedGroupId}
-                onChange={(event) => setSelectedGroupId(event.target.value)}
-              >
-                {groupRows.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name}
-                  </option>
+            <Tabs value={detailTab} onChange={setDetailTab} items={["API", "集成", "系统设置"]} />
+            {detailTab === "API" && (
+              <div className="grid gap-3">
+                <Button asChild write className="w-fit">
+                  <Link to={`/actions?new=1&system=${encodeURIComponent(selected.service)}`}>添加 API</Link>
+                </Button>
+                {systemApis.map((row) => (
+                  <Link
+                    key={row.id}
+                    className="flex flex-wrap gap-2 rounded-lg border p-3 text-sm"
+                    to={`/actions?api=${encodeURIComponent(row.id)}&system=${encodeURIComponent(selected.service)}`}
+                  >
+                    <Badge>{row.httpMethod}</Badge>
+                    <span>{row.name}</span>
+                    <code className="break-all">{row.relativePath}</code>
+                  </Link>
                 ))}
-              </select>
-            </Field>
-            <div>
-              <p className="mb-2 text-sm font-bold">已绑定认证实例</p>
-              <div className="flex flex-wrap gap-2">
-                {demo.authInstances
-                  .filter((instance) => instance.systemIds.includes(selected.service))
-                  .map((instance) => (
-                    <Badge tone={instance.status === "ready" ? "success" : "warning"} key={instance.id}>
-                      {instance.name}
-                    </Badge>
+                {!systemApis.length && (
+                  <p className="text-sm text-[var(--muted-text)]">暂无 API 定义，可以先添加接口再配置访问环境。</p>
+                )}
+              </div>
+            )}
+            {detailTab === "集成" && (
+              <div className="grid gap-3">
+                {demo.integrations
+                  .filter((i) => i.provider === selected.service)
+                  .map((i) => (
+                    <Link
+                      key={i.id}
+                      className="grid gap-1 rounded-lg border p-3 text-sm"
+                      to={`/integrations?integration=${encodeURIComponent(i.id)}`}
+                    >
+                      <strong>
+                        {i.displayName} · {i.name}
+                      </strong>
+                      <span className="break-all">{i.baseUrl}</span>
+                    </Link>
                   ))}
+                <Button asChild write className="w-fit">
+                  <Link to={`/integrations?new=1&system=${encodeURIComponent(selected.service)}`}>创建集成配置</Link>
+                </Button>
               </div>
-            </div>
-            <div>
-              <p className="mb-2 text-sm font-bold">支持的认证模板</p>
-              <div className="grid gap-2 rounded-xl border border-[var(--border)] p-3 sm:grid-cols-2">
-                {templateRows
-                  .filter((template) => template.status === "published")
-                  .map((template) => {
-                    const inUse = demo.authInstances.some(
-                      (instance) =>
-                        instance.systemIds.includes(selected.service) && instance.templateId === template.templateKey,
-                    );
-                    return (
-                      <label key={template.id} className="flex items-center gap-2 text-sm">
-                        <input
-                          type="checkbox"
-                          checked={selectedTemplateKeys.includes(template.templateKey)}
-                          disabled={inUse || !canWrite}
-                          onChange={(event) =>
-                            setSelectedTemplateKeys((items) =>
-                              event.target.checked
-                                ? [...new Set([...items, template.templateKey])]
-                                : items.filter((item) => item !== template.templateKey),
-                            )
-                          }
-                        />
-                        <span>{template.name}</span>
-                        {inUse && <Badge tone="info">实例使用中</Badge>}
-                      </label>
-                    );
-                  })}
-              </div>
-              <p className="mt-2 text-xs text-[var(--muted-text)]">已有认证实例使用的模板不能移除。</p>
-            </div>
-            <div className="rounded-xl border border-[var(--border)] p-4">
-              <p className="text-sm font-bold">配置认证实例</p>
-              <p className="mt-1 text-xs text-[var(--muted-text)]">
-                认证实例属于具体系统，不能复用其他系统的端点或应用凭据。
-              </p>
-              <Link
-                className="mt-3 inline-flex items-center gap-2 text-sm font-semibold text-blue-600 hover:underline"
-                to={`/auth?section=instances&system=${selected.service}`}
-              >
-                <Plus className="size-4" /> 为该系统添加认证实例
-              </Link>
-            </div>
-            <div className="rounded-xl border border-[var(--border)] p-4">
-              <p className="text-sm font-bold">API 操作</p>
-              <p className="mt-1 text-xs text-[var(--muted-text)]">
-                当前数据库中有 {selected.actions} 个定义，其中 {selected.executable} 个可执行。
-              </p>
-              <Link
-                className="mt-3 inline-flex items-center gap-2 text-sm font-semibold text-blue-600 hover:underline"
-                to={`/actions?system=${encodeURIComponent(selected.service)}`}
-              >
-                查看该系统的真实操作
-                <ArrowRight className="size-4" />
-              </Link>
-            </div>
-            <div className="flex justify-end">
-              <Button
-                write
-                variant="secondary"
-                disabled={!selectedTemplateKeys.length || !selectedGroupId}
-                onClick={saveSystemSettings}
-              >
-                保存系统设置
-              </Button>
-              <Button asChild>
-                <Link to={`/integrations?new=1&provider=${selected.service}`}>创建集成配置</Link>
-              </Button>
-            </div>
+            )}
+            {detailTab === "系统设置" && (
+              <>
+                <Field label="系统分组" hint="仅用于目录筛选和管理，不改变运行时权限。">
+                  <select
+                    className={fieldClass}
+                    disabled={!canWrite}
+                    value={selectedGroupId}
+                    onChange={(event) => setSelectedGroupId(event.target.value)}
+                  >
+                    {groupRows.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.name}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <div>
+                  <p className="mb-2 text-sm font-bold">已绑定认证实例</p>
+                  <div className="flex flex-wrap gap-2">
+                    {demo.authInstances
+                      .filter((instance) => instance.systemIds.includes(selected.service))
+                      .map((instance) => (
+                        <Badge tone={instance.status === "ready" ? "success" : "warning"} key={instance.id}>
+                          {instance.name}
+                        </Badge>
+                      ))}
+                  </div>
+                </div>
+                <SystemAuthTemplatePicker
+                  name="edit-system-default-template"
+                  templates={editTemplates}
+                  selectedKeys={selectedTemplateKeys}
+                  defaultKey={selectedDefaultTemplateKey}
+                  inUseKeys={demo.authInstances
+                    .filter((instance) => instance.systemIds.includes(selected.service))
+                    .map((instance) => instance.templateId)}
+                  disabled={!canWrite}
+                  onChange={(keys, defaultKey) => {
+                    setSelectedTemplateKeys(keys);
+                    setSelectedDefaultTemplateKey(defaultKey);
+                  }}
+                />
+                <div className="rounded-xl border border-[var(--border)] p-4">
+                  <p className="text-sm font-bold">配置认证实例</p>
+                  <p className="mt-1 text-xs text-[var(--muted-text)]">
+                    认证实例属于具体系统，不能复用其他系统的端点或应用凭据。
+                  </p>
+                  <Link
+                    className="mt-3 inline-flex items-center gap-2 text-sm font-semibold text-blue-600 hover:underline"
+                    to={`/auth?section=instances&system=${selected.service}`}
+                  >
+                    <Plus className="size-4" /> 为该系统添加认证实例
+                  </Link>
+                </div>
+                <div className="rounded-xl border border-[var(--border)] p-4">
+                  <p className="text-sm font-bold">API 操作</p>
+                  <p className="mt-1 text-xs text-[var(--muted-text)]">
+                    当前数据库中有 {selected.actions} 个定义，其中 {selected.executable} 个可执行。
+                  </p>
+                  <Link
+                    className="mt-3 inline-flex items-center gap-2 text-sm font-semibold text-blue-600 hover:underline"
+                    to={`/actions?system=${encodeURIComponent(selected.service)}`}
+                  >
+                    查看该系统的真实操作
+                    <ArrowRight className="size-4" />
+                  </Link>
+                </div>
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Button
+                    write
+                    variant="secondary"
+                    disabled={
+                      !selectedGroupId ||
+                      !selectedTemplateKeys.includes(selectedDefaultTemplateKey) ||
+                      (authSelectionChanged &&
+                        !templateRows.some((template) => template.templateKey === selectedDefaultTemplateKey)) ||
+                      (!authSelectionChanged && selectedGroupId === (selected.groupId ?? ""))
+                    }
+                    onClick={saveSystemSettings}
+                  >
+                    保存系统设置
+                  </Button>
+                  <Button asChild variant="secondary">
+                    <Link to={`/integrations?new=1&provider=${selected.service}`}>创建集成配置</Link>
+                  </Button>
+                  <Button asChild write>
+                    <Link to={`/auth?section=instances&create=1&system=${encodeURIComponent(selected.service)}`}>
+                      <Plus className="size-4" /> 接入此系统
+                    </Link>
+                  </Button>
+                </div>
+              </>
+            )}
           </div>
         )}
       </Modal>
       <Modal
         open={systemOpen}
         onOpenChange={setSystemOpen}
-        title="添加企业内部系统"
+        title="添加系统"
         description="只登记可复用的系统定义；API 地址和认证实例在集成配置中选择。"
       >
-        <form className="grid gap-4" onSubmit={addSystem}>
+        <MutationForm className="grid gap-4" onSubmit={addSystem}>
           <Field label="系统名称">
             <input className={fieldClass} value={systemName} onChange={(event) => setSystemName(event.target.value)} />
           </Field>
           <Field label="系统标识" hint="用于 API 和配置引用，建议使用小写字母和连字符。">
             <input className={fieldClass} value={systemId} onChange={(event) => setSystemId(event.target.value)} />
           </Field>
-          <Field label="系统分组">
-            <select className={fieldClass} value={systemGroup} onChange={(event) => setSystemGroup(event.target.value)}>
+          <Field
+            label="系统分组"
+            hint={!demo.systemGroups.length ? "暂无系统分组，请先在“管理分组”中创建。" : undefined}
+          >
+            <select
+              className={fieldClass}
+              value={systemGroupValue}
+              disabled={!demo.systemGroups.length}
+              onChange={(event) => setSystemGroup(event.target.value)}
+            >
               {demo.systemGroups.map((item) => (
                 <option key={item}>{item}</option>
               ))}
             </select>
           </Field>
-          <Field label="默认认证模板" hint="保存系统后，可以在认证中心创建多个兼容实例。">
-            <select
-              className={fieldClass}
-              value={systemAuthTemplate}
-              onChange={(event) => setSystemAuthTemplate(event.target.value)}
-            >
-              <optgroup label="内置和企业模板">
-                {authMethodCatalog.map((method) => (
-                  <option key={method.id} value={method.id}>
-                    {method.name}
-                    {method.executable ? "" : "（需 Go 扩展）"}
-                  </option>
-                ))}
-              </optgroup>
-              <optgroup label="自定义模板">
-                {demo.authSchemes
-                  .filter((scheme) => scheme.status === "published")
-                  .map((scheme) => (
-                    <option key={scheme.id} value={scheme.id}>
-                      {scheme.name}
-                    </option>
-                  ))}
-              </optgroup>
-            </select>
-          </Field>
+          <SystemAuthTemplatePicker
+            name="create-system-default-template"
+            templates={selectableTemplates}
+            selectedKeys={systemTemplateKeys}
+            defaultKey={systemDefaultTemplateKey}
+            onChange={(keys, defaultKey) => {
+              setSystemTemplateKeys(keys);
+              setSystemDefaultTemplateKey(defaultKey);
+            }}
+          />
           <div className="flex justify-end gap-2">
             <Button type="button" variant="secondary" onClick={() => setSystemOpen(false)}>
               取消
             </Button>
-            <Button write type="submit">
+            <Button
+              write
+              type="submit"
+              disabled={
+                !systemGroupValue ||
+                !systemTemplateKeys.includes(systemDefaultTemplateKey) ||
+                !selectableTemplates.some((template) => template.templateKey === systemDefaultTemplateKey)
+              }
+            >
               保存系统
             </Button>
           </div>
-        </form>
+        </MutationForm>
       </Modal>
       <Modal
         open={groupsOpen}
-        onOpenChange={setGroupsOpen}
+        onOpenChange={(open) => {
+          setGroupsOpen(open);
+          if (!open) setEditingGroupId("");
+        }}
         title="系统分组"
         description="分组用于筛选和管理系统，不影响运行时权限。"
       >
         <div className="grid gap-4">
           <div className="grid gap-2">
-            {groupRows.map((item) => (
-              <ListRow
-                key={item.id}
-                title={item.name}
-                meta={`${systems.filter((system) => system.category === item.name).length} 个系统`}
-                action={
-                  <div className="flex gap-1">
-                    <Button
-                      variant="ghost"
-                      onClick={() => {
-                        const name = window.prompt("新的分组名称", item.name)?.trim();
-                        if (!name || name === item.name) return;
-                        void api
-                          .updateSystemGroup(item.id, { name, sortOrder: item.sortOrder })
-                          .then(() => Promise.all([loadCatalogMetadata(), demo.reload()]))
-                          .then(() => demo.notify("系统分组已更新"))
-                          .catch((error) => demo.notify(error));
+            {groupRows.map((item) =>
+              editingGroupId === item.id ? (
+                <MutationForm
+                  key={item.id}
+                  className="grid gap-3 rounded-xl border border-blue-500/40 bg-[var(--muted)] p-3"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const name = editingGroupName.trim();
+                    if (!name || name === item.name) return;
+                    return api
+                      .updateSystemGroup(item.id, { name, sortOrder: item.sortOrder })
+                      .then(() => {
+                        if (group === item.name) setGroup(name);
+                        if (systemGroup === item.name) setSystemGroup(name);
+                        return Promise.all([loadCatalogMetadata(), demo.reload()]);
+                      })
+                      .then(() => {
+                        setEditingGroupId("");
+                        demo.notify("系统分组已更新");
+                      })
+                      .catch((error) => demo.notify(error));
+                  }}
+                >
+                  <Field label="分组名称">
+                    <input
+                      autoFocus
+                      required
+                      className={fieldClass}
+                      value={editingGroupName}
+                      onChange={(event) => setEditingGroupName(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          setEditingGroupId("");
+                        }
                       }}
-                    >
-                      重命名
+                    />
+                  </Field>
+                  <div className="flex justify-end gap-2">
+                    <Button type="button" variant="secondary" onClick={() => setEditingGroupId("")}>
+                      取消
                     </Button>
                     <Button
                       write
-                      variant="ghost"
-                      disabled={systems.some((system) => system.category === item.name)}
-                      title={
-                        systems.some((system) => system.category === item.name) ? "请先移走该分组下的系统" : "删除分组"
-                      }
-                      onClick={() =>
-                        window.confirm(`确认删除系统分组“${item.name}”吗？`) &&
-                        void api
-                          .deleteSystemGroup(item.id)
-                          .then(() => Promise.all([loadCatalogMetadata(), demo.reload()]))
-                          .then(() => demo.notify("系统分组已删除"))
-                          .catch((error) => demo.notify(error))
-                      }
+                      type="submit"
+                      disabled={!editingGroupName.trim() || editingGroupName.trim() === item.name}
                     >
-                      删除
+                      保存
                     </Button>
                   </div>
-                }
-              />
-            ))}
+                </MutationForm>
+              ) : (
+                <ListRow
+                  key={item.id}
+                  title={item.name}
+                  meta={`${systems.filter((system) => system.category === item.name).length} 个系统`}
+                  action={
+                    <div className="flex gap-1">
+                      <Button
+                        write
+                        variant="ghost"
+                        disabled={Boolean(editingGroupId)}
+                        onClick={() => {
+                          setEditingGroupId(item.id);
+                          setEditingGroupName(item.name);
+                        }}
+                      >
+                        重命名
+                      </Button>
+                      <Button
+                        write
+                        variant="ghost"
+                        disabled={systems.some((system) => system.category === item.name)}
+                        title={
+                          systems.some((system) => system.category === item.name)
+                            ? "请先移走该分组下的系统"
+                            : "删除分组"
+                        }
+                        onClick={() => {
+                          if (!window.confirm(`确认删除系统分组“${item.name}”吗？`)) return;
+                          return api
+                            .deleteSystemGroup(item.id)
+                            .then(() => Promise.all([loadCatalogMetadata(), demo.reload()]))
+                            .then(() => demo.notify("系统分组已删除"))
+                            .catch((error) => demo.notify(error));
+                        }}
+                      >
+                        删除
+                      </Button>
+                    </div>
+                  }
+                />
+              ),
+            )}
           </div>
-          <form
+          <MutationForm
             className="flex gap-2"
             onSubmit={(event) => {
               event.preventDefault();
               const name = newGroup.trim();
-              if (!canWrite || !name) return;
-              void api
+              if (!name) return;
+              return api
                 .saveSystemGroup({ name, sortOrder: groupRows.length * 10 })
                 .then(() => Promise.all([loadCatalogMetadata(), demo.reload()]))
                 .then(() => {
@@ -424,10 +640,10 @@ function SystemDirectoryPage() {
               onChange={(event) => setNewGroup(event.target.value)}
               placeholder="例如：财务系统"
             />
-            <Button write disabled={!newGroup.trim()}>
+            <Button write type="submit" disabled={!newGroup.trim()}>
               <Plus className="size-4" /> 添加分组
             </Button>
-          </form>
+          </MutationForm>
         </div>
       </Modal>
     </div>

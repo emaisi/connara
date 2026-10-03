@@ -14,8 +14,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"apihub-go/internal/authn"
+	"apihub-go/internal/buildinfo"
 	"apihub-go/internal/catalog"
 	"apihub-go/internal/executor"
 	"apihub-go/internal/rediscache"
@@ -76,84 +78,99 @@ func New(deps Dependencies) http.Handler {
 	r.Post("/webhooks/inbound/{sourceKey}", a.inboundWebhook)
 
 	r.Route("/api", func(r chi.Router) {
-		r.Post("/auth/login", a.login)
+		r.Post("/auth/login", a.audited(a.login))
 		r.Post("/auth/accept-invitation", a.acceptInvitation)
 		r.Group(func(r chi.Router) {
 			r.Use(a.requireAdmin)
 			r.Get("/auth/session", a.currentSession)
-			r.Post("/auth/logout", a.logout)
+			r.Post("/auth/logout", a.audited(a.logout))
 			r.Get("/meta", a.meta)
 
 			r.Get("/lookups", a.catalogLookups)
 			r.Get("/system-groups", a.listSystemGroups)
-			r.Post("/system-groups", a.saveSystemGroup)
-			r.Patch("/system-groups/{id}", a.saveSystemGroup)
-			r.Delete("/system-groups/{id}", a.deleteSystemGroup)
+			r.Post("/system-groups", a.audited(a.saveSystemGroup))
+			r.Patch("/system-groups/{id}", a.audited(a.saveSystemGroup))
+			r.Delete("/system-groups/{id}", a.audited(a.deleteSystemGroup))
 			r.Get("/systems", a.listSystems)
 			r.Get("/systems/{id}", a.getSystem)
-			r.Post("/systems", a.createSystem)
-			r.Patch("/systems/{id}", a.updateSystem)
-			r.Put("/systems/{id}/auth-templates", a.setSystemAuthTemplates)
+			r.Post("/systems", a.audited(a.createSystem))
+			r.Patch("/systems/{id}", a.audited(a.updateSystem))
+			r.Put("/systems/{id}/auth-templates", a.audited(a.setSystemAuthTemplates))
 
 			r.Get("/auth-templates", a.listAuthTemplates)
-			r.Post("/auth-templates", a.saveAuthTemplate)
-			r.Patch("/auth-templates/{id}", a.saveAuthTemplate)
-			r.Post("/auth-templates/{id}/status", a.setAuthTemplateStatus)
-			r.Delete("/auth-templates/{id}", a.deleteAuthTemplate)
+			r.Post("/auth-templates", a.audited(a.saveAuthTemplate))
+			r.Patch("/auth-templates/{id}", a.audited(a.saveAuthTemplate))
+			r.Post("/auth-templates/{id}/status", a.audited(a.setAuthTemplateStatus))
+			r.Delete("/auth-templates/{id}", a.audited(a.deleteAuthTemplate))
 			r.Get("/auth-instances", a.listAuthInstances)
-			r.Post("/auth-instances", a.saveAuthInstance)
-			r.Patch("/auth-instances/{id}", a.saveAuthInstance)
+			r.Post("/auth-instances", a.audited(a.saveAuthInstance))
+			r.Post("/auth-instances/check", a.checkAuthInstance)
+			r.Post("/auth-instances/{id}/check", a.checkAuthInstance)
+			r.Patch("/auth-instances/{id}", a.audited(a.saveAuthInstance))
 			r.Post("/auth-instances/{id}/test", a.testAuthInstance)
 
 			r.Get("/integrations", a.listIntegrations)
-			r.Post("/integrations", a.saveIntegration)
-			r.Patch("/integrations/{id}", a.saveIntegration)
+			r.Post("/integrations", a.audited(a.saveIntegration))
+			r.Patch("/integrations/{id}", a.audited(a.saveIntegration))
 			r.Get("/connections", a.listConnections)
-			r.Post("/connections", a.saveConnection)
-			r.Patch("/connections/{id}", a.saveConnection)
+			r.Post("/connections", a.audited(a.saveConnection))
+			r.Patch("/connections/{id}", a.audited(a.saveConnection))
 			r.Post("/connections/{id}/verify", a.verifyConnection)
+			r.Post("/connections/{id}/enabled", a.audited(a.setConnectionEnabled))
 			r.Post("/oauth/start", a.oauthStart)
 
 			r.Get("/actions", a.listActions)
 			r.Get("/actions/{id}", a.getAction)
-			r.Post("/actions", a.saveAction)
-			r.Patch("/actions/{id}", a.saveAction)
+			r.Post("/actions", a.audited(a.saveAction))
+			r.Patch("/actions/{id}", a.audited(a.saveAction))
 			r.Post("/actions/{id}/test", a.testAction)
+			r.Post("/actions/{id}/preview", a.previewAction)
+			r.Get("/actions/{id}/execution-options", a.actionExecutionOptions)
 
 			r.Get("/sync-tasks", a.listSyncTasks)
-			r.Post("/sync-tasks", a.saveSyncTask)
-			r.Patch("/sync-tasks/{id}", a.saveSyncTask)
-			r.Delete("/sync-tasks/{id}", a.deleteSyncTask)
-			r.Post("/sync-tasks/{id}/deploy", a.deploySyncTask)
-			r.Post("/sync-tasks/{id}/pause", a.pauseSyncTask)
-			r.Post("/sync-tasks/{id}/run", a.runSyncTask)
+			r.Post("/sync-tasks", a.audited(a.saveSyncTask))
+			r.Patch("/sync-tasks/{id}", a.audited(a.saveSyncTask))
+			r.Delete("/sync-tasks/{id}", a.audited(a.deleteSyncTask))
+			r.Post("/sync-tasks/{id}/deploy", a.audited(a.deploySyncTask))
+			r.Post("/sync-tasks/{id}/pause", a.audited(a.pauseSyncTask))
+			r.Post("/sync-tasks/{id}/run", a.audited(a.runSyncTask))
 			r.Get("/sync-tasks/{id}/records", a.listSyncRecords)
 
+			r.Get("/workflows", a.listWorkflows)
+			r.Post("/workflows", a.audited(a.saveWorkflow))
+			r.Get("/workflows/{id}", a.getWorkflow)
+			r.Patch("/workflows/{id}", a.audited(a.saveWorkflow))
+			r.Delete("/workflows/{id}", a.audited(a.deleteWorkflow))
+			r.Post("/workflows/{id}/deploy", a.audited(a.deployWorkflow))
+			r.Post("/workflows/{id}/pause", a.audited(a.pauseWorkflow))
+			r.Post("/workflows/{id}/run", a.audited(a.runWorkflowNow))
+			r.Get("/workflow-runs/{id}/result", a.workflowRunResult)
+
 			r.Get("/webhook-endpoints", a.listWebhookEndpoints)
-			r.Post("/webhook-endpoints", a.saveWebhookEndpoint)
-			r.Patch("/webhook-endpoints/{id}", a.saveWebhookEndpoint)
-			r.Post("/webhook-endpoints/{id}/test", a.testWebhookEndpoint)
+			r.Post("/webhook-endpoints", a.audited(a.saveWebhookEndpoint))
+			r.Patch("/webhook-endpoints/{id}", a.audited(a.saveWebhookEndpoint))
+			r.Post("/webhook-endpoints/{id}/test", a.audited(a.testWebhookEndpoint))
 			r.Get("/webhook-sources", a.listWebhookSources)
-			r.Post("/webhook-sources", a.saveWebhookSource)
-			r.Patch("/webhook-sources/{id}", a.saveWebhookSource)
+			r.Post("/webhook-sources", a.audited(a.saveWebhookSource))
+			r.Patch("/webhook-sources/{id}", a.audited(a.saveWebhookSource))
 			r.Get("/webhook-deliveries", a.listWebhookDeliveries)
 			r.Get("/webhook-deliveries/{id}", a.getWebhookDelivery)
 			r.Get("/webhook-deliveries/{id}/attempts", a.listWebhookDeliveryAttempts)
-			r.Post("/webhook-deliveries/{id}/retry", a.retryWebhookDelivery)
+			r.Post("/webhook-deliveries/{id}/retry", a.audited(a.retryWebhookDelivery))
 
 			r.Get("/runtime-tokens", a.listRuntimeTokens)
-			r.Post("/runtime-tokens", a.createRuntimeToken)
-			r.Delete("/runtime-tokens/{id}", a.revokeRuntimeToken)
+			r.Post("/runtime-tokens", a.audited(a.createRuntimeToken))
+			r.Delete("/runtime-tokens/{id}", a.audited(a.revokeRuntimeToken))
 			r.Get("/operations", a.listOperations)
 			r.Get("/operations/{id}", a.getOperation)
 			r.Get("/metrics", a.metrics)
 			r.Get("/audit-logs", a.listAudit)
 			r.Get("/team/members", a.listTeamMembers)
-			r.Post("/team/members", a.inviteTeamMember)
-			r.Patch("/team/members/{id}", a.updateTeamMember)
-			r.Delete("/team/members/{id}", a.removeTeamMember)
+			r.Post("/team/members", a.audited(a.inviteTeamMember))
+			r.Patch("/team/members/{id}", a.audited(a.updateTeamMember))
+			r.Delete("/team/members/{id}", a.audited(a.removeTeamMember))
 			r.Get("/settings", a.getSettings)
-			r.Patch("/settings", a.saveSettings)
+			r.Patch("/settings", a.audited(a.saveSettings))
 		})
 	})
 
@@ -165,6 +182,10 @@ func New(deps Dependencies) http.Handler {
 		r.Get("/actions/search", a.runtimeActionSearch)
 		r.Get("/actions/{actionKey}", a.runtimeAction)
 		r.Post("/actions/{actionKey}", a.executeAction)
+		r.Get("/workflows", a.runtimeWorkflows)
+		r.Get("/workflows/{key}", a.runtimeWorkflow)
+		r.Post("/workflows/{key}", a.triggerWorkflow)
+		r.Get("/workflow-runs/{id}", a.runtimeWorkflowRun)
 		r.HandleFunc("/proxy/*", func(w http.ResponseWriter, _ *http.Request) {
 			writeRuntimeError(w, http.StatusGone, "proxy_removed", "Provider proxy is not part of this API", nil)
 		})
@@ -202,8 +223,8 @@ func (a *api) meta(w http.ResponseWriter, r *http.Request) {
 		name = settings.PlatformName
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"name": name, "version": "0.2.0", "workspaceId": a.Store.WorkspaceID(),
-		"providerCount": len(a.Catalog.Providers()),
+		"name": name, "version": buildinfo.Version, "workspaceId": a.Store.WorkspaceID(),
+		"providerCount": len(a.Catalog.Providers()), "supportedAuthFlows": authn.ExecutableFlows(),
 	})
 }
 
@@ -332,8 +353,17 @@ func requestID(r *http.Request) string {
 
 func clean(value string, maximum int) string {
 	value = strings.TrimSpace(value)
-	if len(value) > maximum {
-		return value[:maximum]
+	if utf8.RuneCountInString(value) > maximum {
+		return string([]rune(value)[:maximum])
 	}
 	return value
+}
+
+func writeConfigurationError(w http.ResponseWriter, field string, err error) {
+	issue := &executor.FieldError{Field: field, Path: "$", Constraint: err.Error()}
+	var typed *executor.FieldError
+	if errors.As(err, &typed) {
+		issue = typed
+	}
+	writeJSON(w, 400, map[string]any{"code": "invalid_configuration", "message": issue.Error(), "details": map[string]any{"fieldErrors": []*executor.FieldError{issue}}})
 }

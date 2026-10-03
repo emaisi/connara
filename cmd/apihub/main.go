@@ -36,7 +36,9 @@ func main() {
 	}
 	startup, cancelStartup := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelStartup()
-	database, err := store.Open(startup, settings.DatabaseURL, settings.WorkspaceID)
+	database, err := store.OpenWithOptions(startup, settings.DatabaseURL, settings.WorkspaceID, store.PoolOptions{
+		MaxConns: int32(settings.DBMaxConns), MinConns: int32(settings.DBMinConns),
+	})
 	if err != nil {
 		logger.Error("open PostgreSQL", "error", err)
 		os.Exit(1)
@@ -62,11 +64,14 @@ func main() {
 	handler := httpapi.New(httpapi.Dependencies{Store: database, Catalog: providerCatalog, Codec: codec, Auth: authService, Executor: executor.New(client), Cache: cache, Logger: logger, PublicBaseURL: settings.PublicBaseURL})
 	runContext, cancelRun := context.WithCancel(context.Background())
 	defer cancelRun()
-	backgroundService := background.New(database, authService, actionExecutor, codec, client, logger, settings.WorkspaceID+":"+settings.Role)
+	backgroundService := background.New(database, authService, actionExecutor, providerCatalog, codec, client, logger, settings.WorkspaceID+":"+settings.Role)
 	var workers sync.WaitGroup
 	if settings.Role == "all" || settings.Role == "worker" {
 		workers.Add(1)
-		go func() { defer workers.Done(); backgroundService.RunWorker(runContext) }()
+		go func() {
+			defer workers.Done()
+			backgroundService.RunWorkers(runContext, settings.SyncWorkers, settings.WorkflowWorkers, settings.WebhookWorkers)
+		}()
 	}
 	if settings.Role == "all" || settings.Role == "scheduler" {
 		workers.Add(1)

@@ -24,11 +24,13 @@ jobs:
       - run: npm --prefix web ci
       - run: sudo apt-get update && sudo apt-get install -y postgresql-16 redis-server
       - name: Verify frontend and build embedded server
+        env:
+          APIHUB_SKIP_WEB_BUILD: '1'
         run: npm --prefix web run check && ./scripts/build.sh
       - name: Verify isolated PostgreSQL and Redis integration
         env:
           APIHUB_TEST_PG_BIN: /usr/lib/postgresql/16/bin
         run: ./scripts/test-integration.sh
       - run: go vet ./...
-      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - run: GOTOOLCHAIN="$(go env GOVERSION)" go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
       - run: npm --prefix web audit --registry=https://registry.npmjs.org

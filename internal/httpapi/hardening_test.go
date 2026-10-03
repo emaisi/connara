@@ -36,7 +36,7 @@ func TestViewerIsRejectedBeforeHandler(t *testing.T) {
 	}
 	member := members[0]
 	testutil.Exec(t, db, `UPDATE workspace_members SET role='viewer' WHERE id=$1`, member.ID)
-	token := "test-viewer-session"
+	token := "test-viewer-session-" + testutil.ID(t.Name())
 	if err := db.CreateAdminSession(ctx, testutil.ID("session"), member.UserID, tokenHash(token), "", "test", 1, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}

@@ -10,7 +10,7 @@ import (
 )
 
 func (s *Store) ListAuthTemplates(ctx context.Context) ([]model.AuthTemplate, error) {
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.database(ctx).Query(ctx, `
 		SELECT id::text, template_key, name, source, flow_type, status,
 		       credential_schema, token_request, injection_rules,
 		       version, created_at, updated_at
@@ -33,7 +33,7 @@ func (s *Store) ListAuthTemplates(ctx context.Context) ([]model.AuthTemplate, er
 }
 
 func (s *Store) AuthTemplate(ctx context.Context, idOrKey string) (model.AuthTemplate, error) {
-	item, err := scanAuthTemplate(s.pool.QueryRow(ctx, `
+	item, err := scanAuthTemplate(s.database(ctx).QueryRow(ctx, `
 		SELECT id::text, template_key, name, source, flow_type, status,
 		       credential_schema, token_request, injection_rules,
 		       version, created_at, updated_at
@@ -63,7 +63,7 @@ func (s *Store) SaveAuthTemplate(ctx context.Context, item model.AuthTemplate) (
 	if item.Status == "" {
 		item.Status = "draft"
 	}
-	_, err := s.pool.Exec(ctx, `
+	command, err := s.database(ctx).Exec(ctx, `
 		INSERT INTO auth_templates(
 			id, workspace_id, template_key, name, source, flow_type, status,
 			credential_schema, token_request, injection_rules
@@ -75,30 +75,33 @@ func (s *Store) SaveAuthTemplate(ctx context.Context, item model.AuthTemplate) (
 			token_request = EXCLUDED.token_request,
 			injection_rules = EXCLUDED.injection_rules,
 			version = auth_templates.version + 1, updated_at = now()
-		WHERE auth_templates.workspace_id = EXCLUDED.workspace_id AND auth_templates.source = 'custom'`,
+		WHERE auth_templates.workspace_id = EXCLUDED.workspace_id AND auth_templates.source = 'custom' AND auth_templates.version = $11 AND auth_templates.deleted_at IS NULL`,
 		item.ID, s.workspaceID, item.TemplateKey, item.Name, item.Source, item.FlowType, item.Status,
-		jsonOrObject(item.CredentialSchema), jsonOrObject(item.TokenRequest), jsonOrArray(item.InjectionRules))
-	if err != nil {
-		return model.AuthTemplate{}, err
-	}
-	return s.AuthTemplate(ctx, item.ID)
-}
-
-func (s *Store) SetAuthTemplateStatus(ctx context.Context, id, status string) (model.AuthTemplate, error) {
-	command, err := s.pool.Exec(ctx, `
-		UPDATE auth_templates SET status = $3, version = version + 1, updated_at = now()
-		WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`, s.workspaceID, id, status)
+		jsonOrObject(item.CredentialSchema), jsonOrObject(item.TokenRequest), jsonOrArray(item.InjectionRules), item.Version)
 	if err != nil {
 		return model.AuthTemplate{}, err
 	}
 	if command.RowsAffected() == 0 {
-		return model.AuthTemplate{}, ErrNotFound
+		return model.AuthTemplate{}, ErrConflict
+	}
+	return s.AuthTemplate(ctx, item.ID)
+}
+
+func (s *Store) SetAuthTemplateStatus(ctx context.Context, id, status string, expectedVersion int64) (model.AuthTemplate, error) {
+	command, err := s.database(ctx).Exec(ctx, `
+		UPDATE auth_templates SET status = $3, version = version + 1, updated_at = now()
+		WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL AND version=$4`, s.workspaceID, id, status, expectedVersion)
+	if err != nil {
+		return model.AuthTemplate{}, err
+	}
+	if command.RowsAffected() == 0 {
+		return model.AuthTemplate{}, ErrConflict
 	}
 	return s.AuthTemplate(ctx, id)
 }
 
 func (s *Store) DeleteAuthTemplate(ctx context.Context, id string) error {
-	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	return s.withTx(ctx, func(tx pgx.Tx) error {
 		var source string
 		if err := tx.QueryRow(ctx, `SELECT source FROM auth_templates WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`, s.workspaceID, id).Scan(&source); err != nil {
 			return mapNotFound(err)
@@ -122,7 +125,7 @@ func (s *Store) DeleteAuthTemplate(ctx context.Context, id string) error {
 }
 
 func (s *Store) ListAuthInstances(ctx context.Context, systemID string) ([]model.AuthInstance, error) {
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.database(ctx).Query(ctx, `
 		SELECT ai.id::text, ai.instance_key, ai.name, ai.system_id::text, s.system_key,
 		       ai.auth_template_id::text, at.template_key, at.flow_type, ai.status,
 		       COALESCE(ai.token_url, ''), COALESCE(ai.refresh_url, ''),
@@ -152,7 +155,7 @@ func (s *Store) ListAuthInstances(ctx context.Context, systemID string) ([]model
 }
 
 func (s *Store) AuthInstance(ctx context.Context, id string) (model.AuthInstance, error) {
-	item, err := scanAuthInstance(s.pool.QueryRow(ctx, `
+	item, err := scanAuthInstance(s.database(ctx).QueryRow(ctx, `
 		SELECT ai.id::text, ai.instance_key, ai.name, ai.system_id::text, s.system_key,
 		       ai.auth_template_id::text, at.template_key, at.flow_type, ai.status,
 		       COALESCE(ai.token_url, ''), COALESCE(ai.refresh_url, ''),
@@ -187,7 +190,7 @@ func (s *Store) SaveAuthInstance(ctx context.Context, item model.AuthInstance) (
 	if item.Status == "" {
 		item.Status = "draft"
 	}
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	err := s.withTx(ctx, func(tx pgx.Tx) error {
 		var compatible bool
 		if err := tx.QueryRow(ctx, `
 			SELECT EXISTS(
@@ -211,6 +214,13 @@ func (s *Store) SaveAuthInstance(ctx context.Context, item model.AuthInstance) (
 			}
 			if templateStatus != "published" {
 				return fmt.Errorf("%w: ready auth instances require a published template", ErrConflict)
+			}
+		}
+		changed := false
+		if item.Version > 0 {
+			loadErr := tx.QueryRow(ctx, `SELECT status IS DISTINCT FROM $3 OR COALESCE(token_url,'') IS DISTINCT FROM $4 OR COALESCE(refresh_url,'') IS DISTINCT FROM $5 OR COALESCE(token_path,'') IS DISTINCT FROM $6 OR COALESCE(expiry_path,'') IS DISTINCT FROM $7 OR COALESCE(header_name,'') IS DISTINCT FROM $8 OR COALESCE(header_value_template,'') IS DISTINCT FROM $9 OR public_config IS DISTINCT FROM $10::jsonb OR ($11::bytea IS NOT NULL AND secret_blob IS DISTINCT FROM $11) FROM auth_instances WHERE workspace_id=$1 AND id=$2`, s.workspaceID, item.ID, item.Status, item.TokenURL, item.RefreshURL, item.TokenPath, item.ExpiryPath, item.HeaderName, item.HeaderValueTemplate, jsonOrObject(item.PublicConfig), item.SecretBlob).Scan(&changed)
+			if loadErr != nil {
+				return mapNotFound(loadErr)
 			}
 		}
 		command, err := tx.Exec(ctx, `
@@ -239,6 +249,13 @@ func (s *Store) SaveAuthInstance(ctx context.Context, item model.AuthInstance) (
 		if err == nil && command.RowsAffected() == 0 {
 			return ErrConflict
 		}
+		if err == nil && changed {
+			_, err = tx.Exec(ctx, `UPDATE integrations SET target_version=target_version+1,version=version+1,updated_at=now() WHERE workspace_id=$1 AND auth_instance_id=$2 AND deleted_at IS NULL`, s.workspaceID, item.ID)
+			if err != nil {
+				return err
+			}
+			_, err = tx.Exec(ctx, `UPDATE connections SET status='pending',last_verified_at=NULL,last_error_code='auth_configuration_changed',last_error_message='Authentication configuration changed; verify again',updated_at=now() WHERE workspace_id=$1 AND auth_instance_id=$2 AND deleted_at IS NULL`, s.workspaceID, item.ID)
+		}
 		return err
 	})
 	if err != nil {
@@ -248,7 +265,7 @@ func (s *Store) SaveAuthInstance(ctx context.Context, item model.AuthInstance) (
 }
 
 func (s *Store) SetAuthInstanceTestResult(ctx context.Context, id, status string) error {
-	command, err := s.pool.Exec(ctx, `
+	command, err := s.database(ctx).Exec(ctx, `
 		UPDATE auth_instances SET last_tested_at = now(), last_test_status = $3, updated_at = now()
 		WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`, s.workspaceID, id, strings.TrimSpace(status))
 	if err != nil {

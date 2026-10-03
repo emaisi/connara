@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"apihub-go/internal/executor"
 	"apihub-go/internal/jsonutil"
 	"crypto/sha256"
 	"embed"
@@ -136,6 +137,18 @@ func (c *Catalog) Actions(service, query string, limit int) []model.Action {
 }
 
 func (c *Catalog) ValidateInput(action model.Action, input any) error {
+	if action.Runtime != nil {
+		values, ok := input.(map[string]any)
+		if !ok {
+			return fmt.Errorf("input must be an object")
+		}
+		effective, err := executor.PrepareInput(action.Runtime, values)
+		if err != nil {
+			return err
+		}
+		input = effective
+	}
+
 	rawSchema, err := json.Marshal(action.InputSchema)
 	if err != nil {
 		return fmt.Errorf("encode input schema: %w", err)
@@ -159,7 +172,7 @@ func (c *Catalog) ValidateInput(action model.Action, input any) error {
 		return fmt.Errorf("compile input schema: %w", compiled.err)
 	}
 	if err := compiled.schema.Validate(input); err != nil {
-		return fmt.Errorf("input does not match action schema: %w", err)
+		return executor.SchemaFailure("inputSchema", err)
 	}
 	return nil
 }

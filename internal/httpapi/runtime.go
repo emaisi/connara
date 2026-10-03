@@ -1,7 +1,10 @@
 package httpapi
 
 import (
+	"apihub-go/internal/authn"
+	"apihub-go/internal/executor"
 	"apihub-go/internal/jsonutil"
+	"apihub-go/internal/safejson"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,17 +15,20 @@ import (
 	"strings"
 	"time"
 
-	"apihub-go/internal/executor"
 	"apihub-go/internal/model"
 	"apihub-go/internal/policy"
+	"apihub-go/internal/workflow"
 	"github.com/go-chi/chi/v5"
 )
 
 type actionRequest struct {
-	Input          map[string]any `json:"input"`
-	ConnectionKey  string         `json:"connectionKey,omitempty"`
-	ConnectionName string         `json:"connectionName,omitempty"`
-	IntegrationID  string         `json:"integrationId,omitempty"`
+	ExpectedAPIVersion         int64          `json:"expectedApiVersion,omitempty"`
+	ExpectedIntegrationVersion int64          `json:"expectedIntegrationVersion,omitempty"`
+	ExpectedAccountRevision    int64          `json:"expectedAccountRevision,omitempty"`
+	Input                      map[string]any `json:"input"`
+	ConnectionKey              string         `json:"connectionKey,omitempty"`
+	ConnectionName             string         `json:"connectionName,omitempty"`
+	IntegrationID              string         `json:"integrationId,omitempty"`
 }
 
 type actionExecution struct {
@@ -109,7 +115,7 @@ func (a *api) executeActionForAdmin(r *http.Request, actionID string, request ac
 		status, code := executionErrorStatus(err)
 		return status, map[string]any{"code": code, "message": err.Error()}
 	}
-	return result.Status, providerData(result.Body)
+	return result.Status, safejson.Redact(providerData(result.Body))
 }
 
 func (a *api) executeActionCore(ctx context.Context, actionID string, request actionRequest, token model.RuntimeToken, reqID, source, idempotencyKey string) (actionExecution, error) {
@@ -129,35 +135,30 @@ func (a *api) executeActionCore(ctx context.Context, actionID string, request ac
 		request.Input = map[string]any{}
 	}
 	catalogAction := definitionAction(action)
+	if request.ExpectedAPIVersion < 1 || request.ExpectedIntegrationVersion < 1 {
+		return actionExecution{}, executionError{409, "version_required", "Fetch a current request preview before execution"}
+	}
+	integration, connection, noAuth, err := a.actionTarget(ctx, action, request, true)
+	if err != nil {
+		return actionExecution{}, err
+	}
+	if !noAuth && request.ExpectedAccountRevision < 1 {
+		return actionExecution{}, executionError{409, "version_required", "Fetch a current account revision before execution"}
+	}
+	if token.ID != "" && !noAuth && !policy.AllowsConnection(token, connection) {
+		return actionExecution{}, executionError{403, "policy_denied", "runtime policy denied this account"}
+	}
 	if err := a.Catalog.ValidateInput(catalogAction, request.Input); err != nil {
 		return actionExecution{}, executionError{http.StatusBadRequest, "invalid_input", err.Error()}
 	}
-	integrationID := request.IntegrationID
-	if integrationID == "" {
-		integrationID = action.IntegrationID
-	}
-	integration, err := a.Store.IntegrationForSystem(ctx, action.SystemKey, integrationID)
+	var resolved authn.Resolved
+	previewReq, err := executor.BuildRequest(integration.BaseURL, catalogAction.Runtime, request.Input)
 	if err != nil {
-		return actionExecution{}, executionError{http.StatusNotFound, "integration_not_found", "a ready integration was not found"}
-	}
-	connectionKey := request.ConnectionKey
-	if connectionKey == "" {
-		connectionKey = request.ConnectionName
-	}
-	connection, err := a.Store.ConnectionForIntegration(ctx, integration.ID, connectionKey)
-	if err != nil {
-		return actionExecution{}, executionError{http.StatusNotFound, "connection_not_found", "an active connection was not found"}
-	}
-	if token.ID != "" && !policy.AllowsConnection(token, connection) {
-		return actionExecution{}, executionError{http.StatusForbidden, "policy_denied", "runtime policy denied this connection"}
-	}
-	resolved, err := a.Auth.ResolveConnection(ctx, connection)
-	if err != nil {
-		return actionExecution{}, executionError{http.StatusBadGateway, "authentication_failed", err.Error()}
+		return actionExecution{}, executionError{400, "invalid_input", err.Error()}
 	}
 	provider := model.Provider{Service: action.SystemKey, DisplayName: action.SystemKey, BaseURL: integration.BaseURL}
 
-	fingerprintBytes, _ := json.Marshal(map[string]any{"action": action.ActionKey, "connection": connection.ID, "input": request.Input})
+	fingerprintBytes, _ := json.Marshal(map[string]any{"action": action.ID, "apiVersion": action.Version, "integration": integration.ID, "targetVersion": integration.TargetVersion, "connection": connection.ID, "input": request.Input})
 	fingerprint := sha256.Sum256(fingerprintBytes)
 	var idempotency model.IdempotencyRecord
 	if token.ID != "" && idempotencyKey != "" {
@@ -199,23 +200,50 @@ func (a *api) executeActionCore(ctx context.Context, actionID string, request ac
 	if err := a.Store.CreateOperation(ctx, run); err != nil {
 		return actionExecution{}, err
 	}
-	_ = a.Store.AddOperationEvent(ctx, run.ID, "info", "开始调用上游系统", nil)
+	_ = a.Store.AddOperationEvent(ctx, run.ID, "info", "请求目标与定义快照", auditJSON(map[string]any{"request": executor.RequestPreview(previewReq), "apiVersion": action.Version, "integrationVersion": integration.Version, "targetVersion": integration.TargetVersion, "accountRevision": connection.Revision}))
 
+	if !noAuth {
+		resolved, err = a.Auth.ResolveConnection(ctx, connection)
+		if err != nil {
+			body := runtimeBytes(nil, map[string]any{"operationId": run.ID, "outcome": "failed", "stage": "authentication", "requestId": reqID}, "authentication_failed", err.Error())
+			finishCtx, finishCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer finishCancel()
+			if saveErr := a.Store.FinishRuntime(finishCtx, run.ID, "failed", 502, nil, "authentication_failed", err.Error(), idempotency, body); saveErr != nil {
+				return actionExecution{}, saveErr
+			}
+			return actionExecution{Status: 502, Body: body, Operation: run}, nil
+		}
+	}
 	if idempotency.ID != "" {
 		if err := a.Store.StartIdempotency(ctx, idempotency.ID, run.ID); err != nil {
 			return actionExecution{}, err
 		}
 	}
 	dispatched = true
-	providerResult, callErr := a.Executor.Action(ctx, provider, catalogAction, request.Input, nil, executor.RequestAuth{
-		Headers: resolved.Headers, Query: resolved.Query, Cookies: resolved.Cookies,
-	})
+	callCtx, cancelCall := context.WithTimeout(ctx, executor.Budget(action.ExecutionConfig))
+	defer cancelCall()
+	providerResult, callErr := a.Executor.Action(callCtx, provider, catalogAction, request.Input, nil, resolved.RequestAuth())
 
 	finishCtx, cancelFinish := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelFinish()
+	if providerResult.Request != nil {
+		_ = a.Store.AddOperationEvent(finishCtx, run.ID, "info", "上游请求与响应", auditJSON(map[string]any{
+			"request": map[string]any{
+				"method": providerResult.Request.Method, "url": providerResult.Request.URL,
+				"headers": json.RawMessage(safejson.Marshal(providerResult.Request.Headers, 8<<10)),
+				"body":    json.RawMessage(safejson.Marshal(providerResult.Request.Body, 16<<10)),
+			},
+			"response":         map[string]any{"status": providerResult.Status, "headers": json.RawMessage(safejson.Marshal(providerResult.Header, 8<<10)), "body": json.RawMessage(safejson.Marshal(providerData(providerResult.Body), 16<<10))},
+			"responseReceived": providerResult.Status != 0,
+		}))
+	}
 	if callErr != nil {
-		body := runtimeBytes(nil, map[string]any{"operationId": run.ID}, "provider_request_failed", callErr.Error())
-		if err := a.Store.FinishRuntime(finishCtx, run.ID, "unknown", http.StatusBadGateway, nil, "provider_request_failed", callErr.Error(), idempotency, body); err != nil {
+		runStatus := "failed"
+		if executor.OutcomeUnknown(callErr) {
+			runStatus = "unknown"
+		}
+		body := runtimeBytes(nil, map[string]any{"operationId": run.ID, "outcome": runStatus, "stage": "provider_request", "requestId": reqID}, "provider_request_failed", callErr.Error())
+		if err := a.Store.FinishRuntime(finishCtx, run.ID, runStatus, http.StatusBadGateway, nil, "provider_request_failed", callErr.Error(), idempotency, body); err != nil {
 			a.Logger.Error("persist unknown runtime result", "operation_id", run.ID, "error", err)
 		}
 		return actionExecution{Status: http.StatusBadGateway, Body: body, Operation: run}, nil
@@ -225,11 +253,15 @@ func (a *api) executeActionCore(ctx context.Context, actionID string, request ac
 		status = http.StatusBadGateway
 	}
 	runStatus, code, message := "success", "", ""
-	if providerResult.Status < 200 || providerResult.Status >= 300 {
-		runStatus, code, message = "failed", "provider_error", "provider returned an error"
+	checks, checkErr := executor.CheckResponseDetailed(catalogAction.Runtime, providerResult.Status, providerResult.Body, catalogAction.OutputSchema)
+	if checkErr != nil {
+		runStatus, code, message = "failed", "response_check_failed", checkErr.Error()
+		if status >= 200 && status < 300 {
+			status = 502
+		}
 	}
 	data := providerData(providerResult.Body)
-	meta := map[string]any{"operationId": run.ID, "providerStatus": providerResult.Status}
+	meta := map[string]any{"operationId": run.ID, "providerStatus": providerResult.Status, "outcome": runStatus, "requestId": reqID, "checks": checks}
 	body := runtimeBytes(data, meta, code, message)
 	if err := a.Store.FinishRuntime(finishCtx, run.ID, runStatus, status, auditJSON(data), code, message, idempotency, body); err != nil {
 		return actionExecution{}, fmt.Errorf("provider completed but result persistence failed (operation %s): %w", run.ID, err)
@@ -250,10 +282,7 @@ func allowedActions(items []model.ActionDefinition, token model.RuntimeToken) []
 }
 
 func definitionAction(item model.ActionDefinition) model.Action {
-	input, output := map[string]any{}, map[string]any{}
-	_ = jsonutil.Unmarshal(item.InputSchema, &input)
-	_ = jsonutil.Unmarshal(item.OutputSchema, &output)
-	return model.Action{ID: item.ActionKey, Service: item.SystemKey, Name: item.Name, Description: item.Description, RequiredScopes: item.RequiredScopes, InputSchema: input, OutputSchema: output, Runtime: &model.HTTPActionRuntime{Method: item.HTTPMethod, Path: item.RelativePath}, Executable: item.Executable}
+	return workflow.ActionModel(item)
 }
 
 type executionError struct {
@@ -292,65 +321,7 @@ func providerData(data []byte) any {
 }
 
 func auditJSON(value any) []byte {
-	data, err := json.Marshal(value)
-	if err != nil {
-		return nil
-	}
-	var normalized any
-	if jsonutil.Unmarshal(data, &normalized) == nil {
-		data, err = json.Marshal(redactAuditValue(normalized))
-		if err != nil {
-			return nil
-		}
-	}
-	if len(data) > 64<<10 {
-		return []byte(`{"truncated":true}`)
-	}
-	return data
-}
-
-func redactAuditValue(value any) any {
-	switch current := value.(type) {
-	case map[string]any:
-		redacted := make(map[string]any, len(current))
-		for key, item := range current {
-			if sensitiveAuditKey(key) {
-				redacted[key] = "[REDACTED]"
-				continue
-			}
-			redacted[key] = redactAuditValue(item)
-		}
-		return redacted
-	case []any:
-		redacted := make([]any, len(current))
-		for index, item := range current {
-			redacted[index] = redactAuditValue(item)
-		}
-		return redacted
-	default:
-		return current
-	}
-}
-
-func sensitiveAuditKey(key string) bool {
-	normalized := strings.Map(func(char rune) rune {
-		if char >= 'A' && char <= 'Z' {
-			return char + ('a' - 'A')
-		}
-		if char >= 'a' && char <= 'z' || char >= '0' && char <= '9' {
-			return char
-		}
-		return -1
-	}, key)
-	if normalized == "authorization" || normalized == "proxyauthorization" ||
-		normalized == "cookie" || normalized == "setcookie" ||
-		normalized == "apikey" || normalized == "accesskey" || normalized == "privatekey" {
-		return true
-	}
-	return strings.HasSuffix(normalized, "password") ||
-		strings.HasSuffix(normalized, "passwd") ||
-		strings.HasSuffix(normalized, "secret") ||
-		strings.HasSuffix(normalized, "token")
+	return safejson.Marshal(value, 64<<10)
 }
 
 func runtimeBytes(data any, meta map[string]any, code, message string) []byte {

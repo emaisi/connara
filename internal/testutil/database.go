@@ -91,6 +91,10 @@ func Seed(t *testing.T, db *store.Store) Fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.Connection, err = db.MarkConnectionVerifiedVersion(ctx, f.Connection.ID, f.Connection.Revision, f.Integration.TargetVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
 	f.Action, err = db.SaveAction(ctx, model.ActionDefinition{ActionKey: "test.list", Name: "list", SystemID: f.System.ID, IntegrationID: f.Integration.ID, HTTPMethod: "GET", RelativePath: "/records", Executable: true, Status: "active", InputSchema: []byte(`{"type":"object"}`), OutputSchema: []byte(`{}`), RequiredScopes: []string{}})
 	if err != nil {
 		t.Fatal(err)

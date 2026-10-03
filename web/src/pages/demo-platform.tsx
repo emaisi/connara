@@ -69,7 +69,7 @@ export function DemoAccessPage() {
     <div className="grid gap-6">
       <PageHeader
         title="访问控制"
-        description="创建运行时令牌，并直接限定它可以调用的操作和连接账号。"
+        description="创建运行时令牌，并直接限定它可以调用的操作和执行账号。"
         actions={
           <Button adminOnly onClick={() => setOpen(true)}>
             <Plus className="size-4" />
@@ -102,7 +102,7 @@ export function DemoAccessPage() {
                 <Th>令牌</Th>
                 <Th>状态</Th>
                 <Th>操作策略</Th>
-                <Th>连接账号</Th>
+                <Th>执行账号</Th>
                 <Th>最近使用</Th>
                 <Th />
               </tr>
@@ -174,7 +174,7 @@ export function DemoAccessPage() {
             <input type="checkbox" checked={allConnections} onChange={(e) => setAllConnections(e.target.checked)} />
             允许全部连接（包括未来新增连接）
           </label>
-          <Field label="连接账号范围">
+          <Field label="执行账号范围">
             <select
               multiple
               className={`${fieldClass} h-24`}
@@ -421,13 +421,13 @@ export function TeamPage() {
                 aria-label={`移除 ${member.name}`}
                 variant="ghost"
                 disabled={!canAdmin || member.role === "owner"}
-                onClick={() =>
-                  window.confirm(`确认移除成员“${member.email}”吗？`) &&
-                  void api
+                onClick={() => {
+                  if (!window.confirm(`确认移除成员“${member.email}”吗？`)) return;
+                  return api
                     .removeMember(member.id)
                     .then(() => loadMembers())
-                    .catch((error) => demo.notify(error))
-                }
+                    .catch((error) => demo.notify(error));
+                }}
               >
                 <Trash2 className="size-4" />
               </Button>

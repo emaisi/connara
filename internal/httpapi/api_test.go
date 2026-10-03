@@ -3,10 +3,19 @@ package httpapi
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"apihub-go/internal/model"
 )
+
+func TestCleanTruncatesAtUnicodeBoundary(t *testing.T) {
+	value := clean(strings.Repeat("中", 54), 53)
+	if !utf8.ValidString(value) || utf8.RuneCountInString(value) != 53 {
+		t.Fatalf("clean returned invalid or incorrectly sized UTF-8: %q", value)
+	}
+}
 
 func TestRemoteIPUsesTCPPeer(t *testing.T) {
 	for _, test := range []struct{ address, want string }{
@@ -27,6 +36,18 @@ func TestSafeReturnPath(t *testing.T) {
 	for _, test := range []struct{ input, want string }{{"/connections", "/connections"}, {"/connections?tab=oauth", "/connections?tab=oauth"}, {"https://evil.example", ""}, {"//evil.example", ""}, {`/\\evil`, ""}} {
 		if got := safeReturnPath(test.input); got != test.want {
 			t.Fatalf("safeReturnPath(%q)=%q, want %q", test.input, got, test.want)
+		}
+	}
+}
+
+func TestOAuthResultPath(t *testing.T) {
+	for _, test := range []struct{ path, result, connectionID, want string }{
+		{"/connections?integration=github-main", "error", "", "/connections?integration=github-main&oauth=error"},
+		{"/connections?integration=github-main#accounts", "success", "connection-1", "/connections?connectionId=connection-1&integration=github-main&oauth=success#accounts"},
+		{"https://evil.example", "error", "", ""},
+	} {
+		if got := oauthResultPath(test.path, test.result, test.connectionID); got != test.want {
+			t.Errorf("oauthResultPath(%q)=%q, want %q", test.path, got, test.want)
 		}
 	}
 }

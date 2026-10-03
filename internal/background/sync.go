@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 )
 
 type SyncConfig struct {
@@ -41,21 +40,7 @@ func ParseSyncConfig(data []byte) (SyncConfig, error) {
 	return c, nil
 }
 func lookup(value any, path string) (any, bool) {
-	path = strings.TrimPrefix(strings.TrimPrefix(path, "$"), ".")
-	if path == "" {
-		return value, true
-	}
-	for _, key := range strings.Split(path, ".") {
-		object, ok := value.(map[string]any)
-		if !ok {
-			return nil, false
-		}
-		value, ok = object[key]
-		if !ok {
-			return nil, false
-		}
-	}
-	return value, true
+	return jsonutil.PathLookup(value, path)
 }
 func scalar(value any) (string, bool) {
 	switch v := value.(type) {

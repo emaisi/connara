@@ -1,11 +1,14 @@
+import { normalizeAuthRequest, type AuthRequest } from "./auth-request";
 import { DemoContext } from "./demo-context";
 import { PermissionContext } from "./permissions";
 import { queryClient } from "./query";
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { api, ApiError } from "./api";
+import { api, ApiError, type AdminAuthInstance } from "./api";
 import type { AdminSession } from "./types";
 
 export interface DemoIntegration {
+  version?: number;
+  targetVersion?: number;
   id: string;
   name: string;
   provider: string;
@@ -31,6 +34,16 @@ export interface DemoSystem {
   connections: number;
   description: string;
   authTemplateIds: string[];
+  defaultAuthTemplateId?: string;
+}
+
+export const DEFAULT_CUSTOM_SYSTEM_DESCRIPTION = "自建系统，可继续配置认证方式和 API 操作。";
+
+export function systemDescriptionForDisplay(description: string, source: DemoSystem["source"]): string {
+  if (source === "custom" && description === "自定义企业内部系统，可继续配置认证方式和 API 操作。") {
+    return DEFAULT_CUSTOM_SYSTEM_DESCRIPTION;
+  }
+  return description;
 }
 
 export interface DemoAuthScheme {
@@ -38,7 +51,9 @@ export interface DemoAuthScheme {
   name: string;
   flow: string;
   status: "draft" | "published" | "disabled";
-  credentialFields: { name: string; label: string; secret: boolean }[];
+  credentialFields: { name: string; label: string; secret: boolean; required?: boolean; type?: string }[];
+  tokenRequest?: AuthRequest;
+  version?: number;
   injectionRules: { target: string; name: string; template: string }[];
   tokenEndpoint: string;
   refreshEndpoint: string;
@@ -64,19 +79,24 @@ export interface DemoAuthInstance {
   scopes?: string[];
   publicConfig?: Record<string, unknown>;
   version?: number;
+  secrets?: Record<string, string>;
   oauthClientId?: string;
   oauthClientSecret?: string;
+  oauthPrivateKey?: string;
+  oauthCertificate?: string;
+  oauthTLSPrivateKey?: string;
   updatedAt: string;
 }
 
 export interface DemoConnection {
   id: string;
   name: string;
+  connectionKey?: string;
   integration: string;
   provider: string;
   endUser: string;
   authInstanceId: string;
-  status: "active" | "pending" | "error" | "expired";
+  status: "active" | "pending" | "error" | "expired" | "disabled";
   lastVerified: string;
   lastUsed: string;
   records: number;
@@ -95,7 +115,7 @@ export interface DemoToken {
 
 export interface DemoOperation {
   id: string;
-  kind: "Action" | "Sync" | "Webhook" | "Auth";
+  kind: "Action" | "Sync" | "Workflow" | "Webhook" | "Auth";
   name: string;
   integration: string;
   connection: string;
@@ -107,6 +127,7 @@ export interface DemoOperation {
 
 export interface DemoContextValue {
   platformName: string;
+  supportedAuthFlows: string[];
   integrations: DemoIntegration[];
   connections: DemoConnection[];
   tokens: DemoToken[];
@@ -124,7 +145,7 @@ export interface DemoContextValue {
   backendError: string;
   login: (email: string, password: string) => Promise<boolean>;
   logout: () => void;
-  reload: () => Promise<void>;
+  reload: () => Promise<boolean>;
   addIntegration: (
     provider: string,
     name: string,
@@ -133,16 +154,20 @@ export interface DemoContextValue {
     baseUrl?: string,
   ) => Promise<boolean>;
   updateIntegrationAuthInstance: (id: string, authInstanceId: string) => void;
-  addSystem: (name: string, service: string, group: string, authTemplateId: string) => Promise<boolean>;
+  addSystem: (
+    name: string,
+    service: string,
+    group: string,
+    authTemplateIds: string[],
+    defaultAuthTemplateId: string,
+  ) => Promise<boolean>;
   addSystemGroup: (name: string) => void;
   saveAuthScheme: (scheme: DemoAuthScheme) => Promise<boolean>;
   copyAuthScheme: (id: string) => void;
   toggleAuthScheme: (id: string) => void;
   deleteAuthScheme: (id: string) => void;
-  saveAuthInstance: (instance: DemoAuthInstance) => Promise<boolean>;
+  saveAuthInstance: (instance: DemoAuthInstance, refreshAfterSave?: boolean) => Promise<AdminAuthInstance>;
   toggleAuthInstance: (id: string) => void;
-  addConnection: (integration: string, endUser: string, credentials?: Record<string, unknown>) => Promise<boolean>;
-  startOAuth: (integration: string, endUser: string) => Promise<boolean>;
   addToken: (name: string, actions?: string[], connections?: string[]) => void;
   revokeToken: (id: string) => void;
   run: (kind: DemoOperation["kind"], name: string, integration?: string) => void;
@@ -153,6 +178,7 @@ export interface DemoContextValue {
 export function DemoProvider({ children }: { children: ReactNode }) {
   const authEpoch = useRef(0);
   const [platformName, setPlatformName] = useState("APIHub");
+  const [supportedAuthFlows, setSupportedAuthFlows] = useState<string[]>([]);
   const [integrations, setIntegrations] = useState<DemoIntegration[]>([]);
   const [connections, setConnections] = useState<DemoConnection[]>([]);
   const [tokens, setTokens] = useState<DemoToken[]>([]);
@@ -179,7 +205,7 @@ export function DemoProvider({ children }: { children: ReactNode }) {
     setNotice(message instanceof Error ? message.message : message);
   }
 
-  const reload = useCallback(async () => {
+  const reload = useCallback(async (): Promise<boolean> => {
     const epoch = authEpoch.current;
     setLoading(true);
     setBackendError("");
@@ -194,29 +220,24 @@ export function DemoProvider({ children }: { children: ReactNode }) {
           return queryClient.getQueryData<T>([path]) ?? fallback;
         }
       }
-      const [meta, groups, systems, templates, instances, integrationRows, connectionRows, tokenRows, operationRows] =
+      const [meta, groups, lookups, templates, instances, integrationRows, tokenRows, operationRows] =
         await Promise.all([
           resource("/api/meta", api.meta(), { name: "APIHub" } as Awaited<ReturnType<typeof api.meta>>),
           resource("/api/system-groups", api.systemGroups(), []),
-          resource(
-            "/api/systems",
-            api.lookups().then((items) => items.systems),
-            [],
-          ),
+          resource("/api/lookups", api.lookups(), { systems: [], connections: [] } as Awaited<
+            ReturnType<typeof api.lookups>
+          >),
           resource("/api/auth-templates", api.authTemplates(), []),
           resource("/api/auth-instances", api.authInstances(), []),
           resource("/api/integrations", api.integrations(), []),
-          resource(
-            "/api/connections",
-            api.lookups().then((items) => items.connections),
-            [],
-          ),
           resource("/api/runtime-tokens", api.runtimeTokens(), []),
           resource("/api/operations", api.operations(), []),
         ]);
-      if (epoch !== authEpoch.current) return;
+      const { systems, connections: connectionRows } = lookups;
+      if (epoch !== authEpoch.current) return false;
       if (failures.length) setBackendError(failures.join("；"));
       setPlatformName(meta.name || "APIHub");
+      setSupportedAuthFlows(meta.supportedAuthFlows ?? []);
       setAuthenticated(true);
       setGroupIDs(Object.fromEntries(groups.map((item) => [item.name, item.id])));
       setSystemGroups(groups.map((item) => item.name));
@@ -234,10 +255,12 @@ export function DemoProvider({ children }: { children: ReactNode }) {
           actions: item.actionCount,
           executable: item.executableCount,
           connections: item.connectionCount,
-          description: item.description,
+          description: systemDescriptionForDisplay(item.description, item.source),
           authTemplateIds: item.authTemplateIds.map(
             (id: string) => templates.find((template) => template.id === id)?.templateKey ?? id,
           ),
+          defaultAuthTemplateId:
+            templates.find((template) => template.id === item.defaultAuthTemplateId)?.templateKey ?? "",
         })),
       );
       setAuthSchemes(
@@ -251,11 +274,15 @@ export function DemoProvider({ children }: { children: ReactNode }) {
               id: item.templateKey,
               name: item.name,
               flow: flowLabel(item.flowType),
+              tokenRequest: normalizeAuthRequest(token as unknown as AuthRequest),
+              version: item.version,
               status: item.status,
               credentialFields: arrayValue(schema.fields).map((field) => ({
                 name: String(field.name ?? ""),
                 label: String(field.label ?? field.name ?? ""),
                 secret: Boolean(field.secret),
+                required: field.required !== false,
+                type: String(field.type ?? "string"),
               })),
               injectionRules: rules.map((rule) => ({
                 target: rule.target === "query" ? "查询参数" : rule.target === "cookie" ? "Cookie" : "请求头",
@@ -299,6 +326,8 @@ export function DemoProvider({ children }: { children: ReactNode }) {
           systemId: item.systemId,
           displayName: item.systemName,
           baseUrl: item.baseUrl,
+          version: item.version,
+          targetVersion: item.targetVersion,
           authInstanceId: item.authInstanceId,
           status: item.status,
           settings: objectValue(item.settings),
@@ -308,7 +337,8 @@ export function DemoProvider({ children }: { children: ReactNode }) {
       setConnections(
         connectionRows.map((item) => ({
           id: item.id,
-          name: item.connectionKey,
+          name: item.name || item.connectionKey,
+          connectionKey: item.connectionKey,
           integration: item.integrationKey,
           provider: item.systemKey,
           endUser: item.endUserKey,
@@ -346,6 +376,7 @@ export function DemoProvider({ children }: { children: ReactNode }) {
           messages: item.events?.map((event: { message: string }) => event.message) ?? [],
         })),
       );
+      return failures.length === 0;
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         setAuthenticated(false);
@@ -354,6 +385,7 @@ export function DemoProvider({ children }: { children: ReactNode }) {
       } else {
         setBackendError(error instanceof Error ? error.message : "无法连接后端服务");
       }
+      return false;
     } finally {
       setLoading(false);
     }
@@ -388,6 +420,7 @@ export function DemoProvider({ children }: { children: ReactNode }) {
   const value = useMemo<DemoContextValue>(
     () => ({
       platformName,
+      supportedAuthFlows,
       integrations,
       connections,
       tokens,
@@ -420,7 +453,7 @@ export function DemoProvider({ children }: { children: ReactNode }) {
       },
       logout: () => {
         authEpoch.current++;
-        void api.logout().finally(() => {
+        return api.logout().finally(() => {
           setAuthenticated(false);
           setUser(null);
           setIntegrations([]);
@@ -450,7 +483,7 @@ export function DemoProvider({ children }: { children: ReactNode }) {
       updateIntegrationAuthInstance: (id, authInstanceId) => {
         const current = integrations.find((item) => item.id === id);
         if (!current) return;
-        void api
+        return api
           .saveIntegration(
             {
               integrationKey: current.name,
@@ -467,17 +500,32 @@ export function DemoProvider({ children }: { children: ReactNode }) {
           .then(() => notify("集成使用的认证实例已更新"))
           .catch((error) => notify(error));
       },
-      addSystem: (name, service, group, authTemplateId) => {
+      addSystem: (name, service, group, authTemplateKeys, defaultAuthTemplateKey) => {
+        const groupId = groupIDs[group];
+        const authTemplateIds = authTemplateKeys
+          .map((key) => templateIDs[key])
+          .filter((id): id is string => Boolean(id));
+        const defaultAuthTemplateId = templateIDs[defaultAuthTemplateKey];
+        if (
+          !groupId ||
+          !defaultAuthTemplateId ||
+          authTemplateIds.length !== authTemplateKeys.length ||
+          !authTemplateIds.includes(defaultAuthTemplateId)
+        ) {
+          notify(new Error("系统分组或认证模板尚未加载完成，请稍后重试"));
+          return Promise.resolve(false);
+        }
         return api
           .createSystem({
             systemKey: service.trim(),
             name: name.trim(),
-            groupId: groupIDs[group],
-            defaultAuthTemplateId: templateIDs[authTemplateId],
-            description: "自定义企业内部系统，可继续配置认证方式和 API 操作。",
+            groupId,
+            authTemplateIds,
+            defaultAuthTemplateId,
+            description: DEFAULT_CUSTOM_SYSTEM_DESCRIPTION,
           })
           .then(() => reload())
-          .then(() => notify(`企业系统 ${name.trim()} 已添加`))
+          .then(() => notify(`已添加自建系统：${name.trim()}`))
           .then(() => true)
           .catch((error) => {
             notify(error);
@@ -487,7 +535,7 @@ export function DemoProvider({ children }: { children: ReactNode }) {
       addSystemGroup: (name) => {
         const next = name.trim();
         if (!next || systemGroups.includes(next)) return;
-        void api
+        return api
           .saveSystemGroup({ name: next, sortOrder: systemGroups.length * 10 })
           .then(() => reload())
           .then(() => notify(`系统分组 ${next} 已添加`))
@@ -503,10 +551,11 @@ export function DemoProvider({ children }: { children: ReactNode }) {
               flowType: flowKey(scheme.flow),
               status: scheme.status,
               credentialSchema: { type: "object", fields: scheme.credentialFields },
-              tokenRequest: {
+              tokenRequest: scheme.tokenRequest ?? {
                 method: "POST",
                 bodyType: scheme.flow === "表单换取令牌" ? "form" : "json",
               },
+              version: scheme.version,
               injectionRules: scheme.injectionRules.map((rule) => ({
                 target: injectionTargetKey(rule.target),
                 name: rule.name,
@@ -525,43 +574,46 @@ export function DemoProvider({ children }: { children: ReactNode }) {
       },
       copyAuthScheme: (id) => {
         const source = authSchemes.find((item) => item.id === id);
-        if (source) {
-          const copy = {
-            ...source,
-            id: `${source.id}-copy-${Date.now()}`,
-            name: `${source.name} 副本`,
-            status: "draft" as const,
-          };
-          const body = {
-            templateKey: copy.id,
-            name: copy.name,
-            flowType: flowKey(copy.flow),
-            status: copy.status,
-            credentialSchema: { type: "object", fields: copy.credentialFields },
-            tokenRequest: {
-              method: "POST",
-              bodyType: copy.flow === "表单换取令牌" ? "form" : "json",
-            },
-            injectionRules: copy.injectionRules.map((rule) => ({
-              ...rule,
-              target: injectionTargetKey(rule.target),
-            })),
-          };
-          void api
-            .saveAuthTemplate(body)
-            .then(() => reload())
-            .then(() => notify("认证模板已复制为草稿"))
-            .catch((error) => notify(error));
-        }
+        if (!source) return;
+        const copy = {
+          ...source,
+          id: `${source.id}-copy-${Date.now()}`,
+          name: `${source.name} 副本`,
+          status: "draft" as const,
+        };
+        const body = {
+          templateKey: copy.id,
+          name: copy.name,
+          flowType: flowKey(copy.flow),
+          status: copy.status,
+          credentialSchema: { type: "object", fields: copy.credentialFields },
+          tokenRequest: copy.tokenRequest ?? {
+            method: "POST",
+            bodyType: copy.flow === "表单换取令牌" ? "form" : "json",
+          },
+          injectionRules: copy.injectionRules.map((rule) => ({
+            ...rule,
+            target: injectionTargetKey(rule.target),
+          })),
+        };
+        return api
+          .saveAuthTemplate(body)
+          .then(() => reload())
+          .then(() => notify("认证模板已复制为草稿"))
+          .catch((error) => notify(error));
       },
       toggleAuthScheme: (id) => {
         const scheme = authSchemes.find((item) => item.id === id);
-        if (scheme)
-          void api
-            .setAuthTemplateStatus(templateIDs[id], scheme.status === "published" ? "disabled" : "published")
-            .then(() => reload())
-            .then(() => notify("认证模板状态已更新"))
-            .catch((error) => notify(error));
+        if (!scheme) return;
+        return api
+          .setAuthTemplateStatus(
+            templateIDs[id],
+            scheme.status === "published" ? "disabled" : "published",
+            scheme.version,
+          )
+          .then(() => reload())
+          .then(() => notify("认证模板状态已更新"))
+          .catch((error) => notify(error));
       },
       deleteAuthScheme: (id) => {
         const scheme = authSchemes.find((item) => item.id === id);
@@ -569,14 +621,13 @@ export function DemoProvider({ children }: { children: ReactNode }) {
           notify("认证模板已有实例，不能删除");
           return;
         }
-        void api
+        return api
           .deleteAuthTemplate(templateIDs[id])
           .then(() => reload())
           .then(() => notify(`认证模板 ${scheme.name} 已删除`))
           .catch((error) => notify(error));
       },
-      saveAuthInstance: (instance) => {
-        const editing = Boolean(instance.id && authInstances.some((item) => item.id === instance.id));
+      saveAuthInstance: (instance, refreshAfterSave = true) => {
         return api
           .saveAuthInstance(
             {
@@ -599,129 +650,93 @@ export function DemoProvider({ children }: { children: ReactNode }) {
               },
               version: instance.version ?? authInstances.find((item) => item.id === instance.id)?.version,
               secrets: Object.fromEntries(
-                Object.entries({ clientId: instance.oauthClientId, clientSecret: instance.oauthClientSecret }).filter(
-                  ([, value]) => Boolean(value),
-                ),
+                Object.entries({
+                  ...instance.secrets,
+                  clientId: instance.oauthClientId,
+                  clientSecret: instance.oauthClientSecret,
+                  oauth_private_key: instance.oauthPrivateKey,
+                  certificate: instance.oauthCertificate,
+                  tls_private_key: instance.oauthTLSPrivateKey,
+                }).filter(([, value]) => Boolean(value)),
               ),
             },
-            editing ? instance.id : "",
+            instance.id,
           )
-          .then(() => reload())
-          .then(() => notify(`认证实例 ${instance.name} 已保存`))
-          .then(() => true)
-          .catch((error) => {
-            notify(error);
-            return false;
+          .then((result) => {
+            if (!refreshAfterSave) return result;
+            return reload().then(() => {
+              notify(`认证实例 ${instance.name} 已保存`);
+              return result;
+            });
           });
       },
       toggleAuthInstance: (id) => {
         const instance = authInstances.find((item) => item.id === id);
-        if (instance) {
-          const updated = { ...instance, status: instance.status === "ready" ? "disabled" : ("ready" as const) };
-          const editing = true;
-          void api
-            .saveAuthInstance(
-              {
-                instanceKey: instance.instanceKey ?? instance.id,
-                name: instance.name,
-                systemId: systemIDs[instance.systemIds[0]],
-                authTemplateId: templateIDs[instance.templateId],
-                status: updated.status,
-                tokenUrl: instance.tokenEndpoint,
-                refreshUrl: instance.refreshEndpoint,
-                tokenPath: instance.tokenPath,
-                expiryPath: instance.expiryPath,
-                headerName: instance.headerName,
-                headerValueTemplate: instance.headerValueTemplate,
-                publicConfig: {
-                  ...authInstances.find((item) => item.id === instance.id)?.publicConfig,
-                  ...instance.publicConfig,
-                  authorizationUrl: instance.authorizationUrl ?? "",
-                  scopes: instance.scopes ?? [],
-                },
-                version: instance.version ?? authInstances.find((item) => item.id === instance.id)?.version,
-                secrets: {},
+        if (!instance) return;
+        const updated = { ...instance, status: instance.status === "ready" ? "disabled" : ("ready" as const) };
+        const editing = true;
+        return api
+          .saveAuthInstance(
+            {
+              instanceKey: instance.instanceKey ?? instance.id,
+              name: instance.name,
+              systemId: systemIDs[instance.systemIds[0]],
+              authTemplateId: templateIDs[instance.templateId],
+              status: updated.status,
+              tokenUrl: instance.tokenEndpoint,
+              refreshUrl: instance.refreshEndpoint,
+              tokenPath: instance.tokenPath,
+              expiryPath: instance.expiryPath,
+              headerName: instance.headerName,
+              headerValueTemplate: instance.headerValueTemplate,
+              publicConfig: {
+                ...authInstances.find((item) => item.id === instance.id)?.publicConfig,
+                ...instance.publicConfig,
+                authorizationUrl: instance.authorizationUrl ?? "",
+                scopes: instance.scopes ?? [],
               },
-              editing ? instance.id : "",
-            )
-            .then(() => reload())
-            .then(() => notify("认证实例状态已更新"))
-            .catch((error) => notify(error));
-        }
-      },
-      addConnection: (integration, endUser, credentials = { apiKey: "" }) => {
-        const selected = integrations.find((item) => item.name === integration);
-        if (!selected) return Promise.resolve(false);
-        const connectionKey = `${selected.provider}-${Date.now().toString(36)}`;
-        return api
-          .saveConnection({
-            integrationId: selected.id,
-            name: connectionKey,
-            credentials,
-            connectionKey,
-            endUserKey: endUser,
-          })
-          .then((created) => api.verifyConnection(created.id))
+              version: instance.version ?? authInstances.find((item) => item.id === instance.id)?.version,
+              secrets: {},
+            },
+            editing ? instance.id : "",
+          )
           .then(() => reload())
-          .then(() => notify("认证配置解析完成，连接账号已创建"))
-          .then(() => true)
-          .catch((error) => {
-            notify(error);
-            return false;
-          });
-      },
-      startOAuth: (integration, endUser) => {
-        const selected = integrations.find((item) => item.name === integration);
-        if (!selected) return Promise.resolve(false);
-        const connectionKey = `${selected.provider}-${Date.now().toString(36)}`;
-        return api
-          .oauthStart({
-            integrationId: selected.id,
-            endUserKey: endUser,
-            connectionKey,
-            connectionName: connectionKey,
-            returnPath: "/connections",
-          })
-          .then((result) => {
-            window.location.assign(result.authorizationUrl);
-          })
-          .then(() => true)
-          .catch((error) => {
-            notify(error);
-            return false;
-          });
+          .then(() => notify("认证实例状态已更新"))
+          .catch((error) => notify(error));
       },
       addToken: (name, actions = ["*"], allowedConnections = []) => {
-        void api
+        return api
           .createRuntimeToken({ name, allowedActions: actions, blockedActions: [], allowedConnections })
           .then(() => reload())
           .then(() => notify("运行时令牌已创建，明文仅显示一次"))
           .catch((error) => notify(error));
       },
       revokeToken: (id) => {
-        void api
+        return api
           .revokeRuntimeToken(id)
           .then(() => reload())
           .then(() => notify("运行时令牌已撤销"))
           .catch((error) => notify(error));
       },
       run: (kind, name, _integration = "github-production") => {
-        if (kind === "Sync") {
-          void api
-            .syncTasks()
-            .then((tasks) => {
-              const task = tasks.find((item) => item.name === name || item.taskKey === name);
-              if (!task) throw new Error("未找到同步任务");
-              return api.runSyncTask(task.id);
-            })
-            .then(() => reload())
-            .then(() => notify(`同步任务 ${name} 已进入队列`))
-            .catch((error) => notify(error));
-        } else notify(`${operationKindLabel(kind)} 请在对应页面执行真实操作`);
+        if (kind !== "Sync") {
+          notify(`${operationKindLabel(kind)} 请在对应页面执行真实操作`);
+          return;
+        }
+        return api
+          .syncTasks()
+          .then((tasks) => {
+            const task = tasks.find((item) => item.name === name || item.taskKey === name);
+            if (!task) throw new Error("未找到同步任务");
+            return api.runSyncTask(task.id);
+          })
+          .then(() => reload())
+          .then(() => notify(`同步任务 ${name} 已进入队列`))
+          .catch((error) => notify(error));
       },
       notify,
       reset: () => {
-        void queryClient
+        return queryClient
           .invalidateQueries()
           .then(() => reload())
           .then(() => notify("已从后端重新加载数据"));
@@ -742,6 +757,7 @@ export function DemoProvider({ children }: { children: ReactNode }) {
       noticeError,
       operations,
       platformName,
+      supportedAuthFlows,
       reload,
       systemGroups,
       systemIDs,
@@ -776,7 +792,15 @@ export function durationLabel(start?: string, end?: string): string {
   return `${Math.max(0, new Date(end).getTime() - new Date(start).getTime())} ms`;
 }
 export function kindLabel(value: string): DemoOperation["kind"] {
-  return value === "sync" ? "Sync" : value === "webhook" ? "Webhook" : value === "auth" ? "Auth" : "Action";
+  return value === "sync"
+    ? "Sync"
+    : value === "workflow"
+      ? "Workflow"
+      : value === "webhook"
+        ? "Webhook"
+        : value === "auth"
+          ? "Auth"
+          : "Action";
 }
 function flowLabel(value: string): string {
   return value === "password_token"
@@ -808,6 +832,7 @@ export function operationKindLabel(kind: string): string {
   const labels: Record<string, string> = {
     Action: "操作",
     Sync: "同步",
+    Workflow: "工作流",
     Webhook: "Webhook",
     Auth: "认证",
   };

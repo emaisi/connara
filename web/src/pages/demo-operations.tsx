@@ -24,6 +24,8 @@ import { Badge, Button, Card, CopyButton, Field, Modal, PageHeader, cn, fieldCla
 import { Tabs } from "./core-shared";
 import { api } from "../api";
 
+import { RequestResponseDetails } from "./request-response-details";
+
 export function OperationsPage() {
   const demo = useDemo();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -62,6 +64,7 @@ export function OperationsPage() {
       integration: integrationFilter,
       connection: connectionFilter,
       task: searchParams.get("task") ?? "",
+      workflow: searchParams.get("workflow") ?? "",
       from: from ? new Date(from).toISOString() : "",
       to: to ? new Date(to).toISOString() : "",
     },
@@ -134,7 +137,7 @@ export function OperationsPage() {
           <Button
             variant="secondary"
             onClick={() =>
-              void Promise.all([demo.reload(), api.metrics().then(setMetrics)]).catch((error) => demo.notify(error))
+              Promise.all([demo.reload(), api.metrics().then(setMetrics)]).catch((error) => demo.notify(error))
             }
           >
             <RefreshCw className="size-4" />
@@ -190,7 +193,7 @@ export function OperationsPage() {
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             aria-label="搜索运行记录"
-            placeholder="搜索运行记录、连接账号或执行 ID"
+            placeholder="搜索运行记录、执行账号或执行 ID"
           />
         </div>
         <select
@@ -202,6 +205,7 @@ export function OperationsPage() {
           <option>全部</option>
           <option value="Action">操作</option>
           <option value="Sync">同步</option>
+          <option value="Workflow">工作流</option>
           <option value="Webhook">Webhook</option>
           <option value="Auth">认证</option>
         </select>
@@ -288,7 +292,7 @@ export function OperationsPage() {
                 <Th>运行记录</Th>
                 <Th>类型</Th>
                 <Th>集成配置</Th>
-                <Th>连接账号</Th>
+                <Th>执行账号</Th>
                 <Th>耗时</Th>
                 <Th>时间</Th>
                 <Th />
@@ -354,6 +358,7 @@ export function OperationsPage() {
                 平台无法确认上游结果。请先核对上游是否已处理本次请求，再决定是否重试，以免重复执行。
               </p>
             )}
+            {detail !== null && <RequestResponseDetails detail={detail} />}
             {detail !== null && (
               <details>
                 <summary className="cursor-pointer text-sm">输入、输出和请求详情</summary>
@@ -409,7 +414,7 @@ export function MetricsPage() {
   const operationStatusKey = demo.operations.map((item) => `${item.id}:${item.status}`).join("|");
   const hours = range === "7 天" ? 168 : range === "30 天" ? 720 : 24;
   function refreshMetrics() {
-    void api
+    return api
       .metrics(hours)
       .then((value) => {
         setMetrics(value);
@@ -417,7 +422,7 @@ export function MetricsPage() {
       })
       .catch((error) => demo.notify(error));
   }
-  useEffect(refreshMetrics, [hours, operationStatusKey]);
+  useEffect(() => void refreshMetrics(), [hours, operationStatusKey]);
   return (
     <div className="grid gap-6">
       <PageHeader
@@ -541,7 +546,7 @@ export function WebhooksPage() {
   const [sources, setSources] = useState<any[]>([]);
   const [sourceOpen, setSourceOpen] = useState(false);
   const [sourceKey, setSourceKey] = useState("enterprise-events");
-  const [sourceName, setSourceName] = useState("企业系统事件");
+  const [sourceName, setSourceName] = useState("系统事件");
   const [sourceIntegrationId, setSourceIntegrationId] = useState("");
   const [sourceSecret, setSourceSecret] = useState("");
   const [deliveries, setDeliveries] = useState<
@@ -653,7 +658,7 @@ export function WebhooksPage() {
               disabled={!endpointId || !enabled}
               onClick={() =>
                 endpointId &&
-                void api
+                api
                   .testWebhookEndpoint(endpointId)
                   .then(() => refreshDeliveries())
                   .then(() => {
@@ -834,7 +839,7 @@ export function WebhooksPage() {
               onClick={() => {
                 setEditingSourceId("");
                 setSourceKey("enterprise-events");
-                setSourceName("企业系统事件");
+                setSourceName("系统事件");
                 setSourceStatus("active");
                 setSourceSecret("");
                 setSourceOpen(true);
@@ -1013,7 +1018,7 @@ export function WebhooksPage() {
                   : "只有重试中或已终止的失败投递可以手动重排"
               }
               onClick={() =>
-                void api
+                api
                   .retryWebhookDelivery(selected.id)
                   .then(() => {
                     demo.notify("Webhook 投递任务已重新排队");

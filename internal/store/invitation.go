@@ -11,7 +11,7 @@ import (
 // set for newly invited users; existing accounts must never be reset by an invitation.
 func (s *Store) AcceptInvitation(ctx context.Context, hash, passwordHash, displayName string) (model.TeamMember, error) {
 	var memberID string
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	err := s.withTx(ctx, func(tx pgx.Tx) error {
 		var id, email, role string
 		if err := tx.QueryRow(ctx, `SELECT id::text,email,role FROM workspace_invitations WHERE workspace_id=$1 AND token_hash=$2 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>now() FOR UPDATE`, s.workspaceID, hash).Scan(&id, &email, &role); err != nil {
 			return mapNotFound(err)

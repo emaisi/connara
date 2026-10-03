@@ -129,7 +129,7 @@ describe("mobile navigation", () => {
     expect(screen.getByRole("menuitem", { name: "退出登录" })).toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([input]) => String(input) === "/api/auth/logout")).toBe(false);
   });
-  it("opens the current group on deep links and keeps only one group expanded while navigating", async () => {
+  it("keeps primary navigation visible and collapses advanced tools when leaving them", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn((input: RequestInfo | URL) =>
@@ -158,18 +158,18 @@ describe("mobile navigation", () => {
       </MemoryRouter>,
     );
     const nav = within(await screen.findByRole("navigation", { name: "功能导航" }));
-    expect(nav.getByRole("button", { name: "自动化" })).toHaveAttribute("aria-expanded", "true");
+    expect(nav.getByRole("button", { name: "更多功能" })).toHaveAttribute("aria-expanded", "true");
     expect(nav.getByRole("link", { name: "Webhook" })).toHaveAttribute("aria-current", "page");
-    expect(nav.queryByRole("link", { name: "认证中心" })).not.toBeInTheDocument();
-    fireEvent.click(nav.getByRole("button", { name: "集成管理" }));
-    expect(nav.getByRole("button", { name: "自动化" })).toHaveAttribute("aria-expanded", "false");
+    expect(nav.getByRole("link", { name: "系统" })).toBeInTheDocument();
+    expect(nav.getByRole("link", { name: "API" })).toBeInTheDocument();
+    expect(nav.getByRole("link", { name: "集成" })).toBeInTheDocument();
+    expect(nav.getByRole("link", { name: "认证中心" })).toBeInTheDocument();
+    fireEvent.click(nav.getByRole("link", { name: "认证中心" }));
+    expect(nav.getByRole("link", { name: "认证中心" })).toHaveAttribute("aria-current", "page");
+    expect(nav.getByRole("button", { name: "更多功能" })).toHaveAttribute("aria-expanded", "false");
     expect(nav.queryByRole("link", { name: "Webhook" })).not.toBeInTheDocument();
-    fireEvent.click(nav.getByRole("link", { name: "连接账号" }));
-    expect(nav.getByRole("link", { name: "连接账号" })).toHaveAttribute("aria-current", "page");
-    expect(nav.getByRole("button", { name: "集成管理" })).toHaveAttribute("aria-expanded", "true");
     fireEvent.click(nav.getByRole("link", { name: "概览" }));
-    expect(nav.getAllByRole("button").every((button) => button.getAttribute("aria-expanded") === "false")).toBe(true);
-    expect(nav.getAllByRole("link")).toHaveLength(3);
+    expect(nav.getAllByRole("link")).toHaveLength(6);
     const help = within(screen.getByRole("navigation", { name: "帮助导航" }));
     expect(help.getByRole("link", { name: "快速开始" })).toHaveAttribute("href", "/getting-started");
     expect(help.getByRole("link", { name: "开发者文档" })).toHaveAttribute("href", "/resources");

@@ -18,7 +18,6 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id) {
-          if (id.includes("/node_modules/recharts/")) return "charts";
           if (id.includes("/node_modules/@tanstack/")) return "tanstack";
         },
       },

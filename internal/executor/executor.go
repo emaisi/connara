@@ -1,17 +1,20 @@
 package executor
 
 import (
-	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"regexp"
 	"strings"
+	"sync/atomic"
 
+	"apihub-go/internal/buildinfo"
 	"apihub-go/internal/model"
 )
 
@@ -20,9 +23,10 @@ const maxProviderResponse = 4 << 20
 var pathParameter = regexp.MustCompile(`\{([A-Za-z0-9_]+)\}`)
 
 type Result struct {
-	Status int
-	Header http.Header
-	Body   []byte
+	Request *Preview
+	Status  int
+	Header  http.Header
+	Body    []byte
 }
 
 type Executor struct {
@@ -33,6 +37,8 @@ type RequestAuth struct {
 	Headers map[string]string
 	Query   map[string]string
 	Cookies map[string]string
+	Sign    func(context.Context, *http.Request) error
+	TLS     *tls.Config
 }
 
 func New(client *http.Client) *Executor { return &Executor{client: client} }
@@ -48,42 +54,19 @@ func (e *Executor) Action(
 	if action.Runtime == nil || provider.BaseURL == "" {
 		return Result{}, errors.New("action is catalog-only")
 	}
-	method := strings.ToUpper(action.Runtime.Method)
-	if method == "" {
-		method = http.MethodPost
-	}
-	path, remaining, err := expandPath(action.Runtime.Path, input)
+	req, err := BuildRequest(provider.BaseURL, action.Runtime, input)
 	if err != nil {
 		return Result{}, err
 	}
-	target, err := joinTarget(provider.BaseURL, path)
-	if err != nil {
-		return Result{}, err
-	}
-
-	var body io.Reader
-	if method == http.MethodGet || method == http.MethodHead {
-		addQuery(target, remaining)
-	} else if len(remaining) > 0 {
-		data, err := json.Marshal(remaining)
-		if err != nil {
-			return Result{}, fmt.Errorf("encode provider request: %w", err)
-		}
-		body = bytes.NewReader(data)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, method, target.String(), body)
-	if err != nil {
-		return Result{}, err
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "apihub-go/0.1")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
+	req = req.WithContext(ctx)
+	req.Header.Set("User-Agent", buildinfo.UserAgent)
 	if err := injectCredential(req, provider.Credential, credential); err != nil {
 		return Result{}, err
 	}
+	logRequest := req.Clone(ctx)
+	logRequest.Header = req.Header.Clone()
+	signedQueryFields := []string{}
+	client := e.client
 	if len(requestAuth) > 0 {
 		for name, value := range requestAuth[0].Headers {
 			req.Header.Set(name, value)
@@ -96,25 +79,105 @@ func (e *Executor) Action(
 		for name, value := range requestAuth[0].Cookies {
 			req.AddCookie(&http.Cookie{Name: name, Value: value, Secure: true, HttpOnly: true})
 		}
+		if requestAuth[0].Sign != nil {
+			beforeSigning := req.Header.Clone()
+			beforeQuery := req.URL.Query()
+			if err := requestAuth[0].Sign(ctx, req); err != nil {
+				return Result{}, fmt.Errorf("sign provider request: %w", err)
+			}
+			for name, values := range req.URL.Query() {
+				if strings.Join(values, "\n") != strings.Join(beforeQuery[name], "\n") {
+					signedQueryFields = append(signedQueryFields, name)
+				}
+			}
+			for name, values := range req.Header {
+				if strings.Join(values, "\n") != strings.Join(beforeSigning.Values(name), "\n") {
+					logRequest.Header.Set(name, "[REDACTED]")
+				}
+			}
+			copy := *client
+			copy.CheckRedirect = func(*http.Request, []*http.Request) error {
+				return errors.New("signed provider requests cannot redirect")
+			}
+			client = &copy
+		}
+		if requestAuth[0].TLS != nil {
+			var cleanup func()
+			var err error
+			client, cleanup, err = ClientWithTLS(client, requestAuth[0].TLS)
+			if err != nil {
+				return Result{}, err
+			}
+			defer cleanup()
+		}
 	}
-	return e.do(req)
+	client, cleanup, err := ConfiguredEndpointClient(client, provider.BaseURL)
+	if err != nil {
+		return Result{}, err
+	}
+	defer cleanup()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return errors.New("provider redirects are disabled") }
+	// Record the final constructed request, with configured authentication fields masked.
+	masked := req.Clone(ctx)
+	masked.Header = req.Header.Clone()
+	query := masked.URL.Query()
+	if provider.Credential != nil {
+		if provider.Credential.In == "header" {
+			masked.Header.Set(provider.Credential.Name, "[REDACTED]")
+		}
+		if provider.Credential.In == "query" {
+			query.Set(provider.Credential.Name, "[REDACTED]")
+		}
+	}
+	if len(requestAuth) > 0 {
+		for name := range requestAuth[0].Headers {
+			masked.Header.Set(name, "[REDACTED]")
+		}
+		for name := range requestAuth[0].Query {
+			query.Set(name, "[REDACTED]")
+		}
+		if len(requestAuth[0].Cookies) > 0 {
+			masked.Header.Set("Cookie", "[REDACTED]")
+		}
+	}
+	for name, values := range logRequest.Header {
+		if len(values) == 1 && values[0] == "[REDACTED]" {
+			masked.Header.Set(name, "[REDACTED]")
+		}
+	}
+	for _, name := range signedQueryFields {
+		query.Set(name, "[REDACTED]")
+	}
+	masked.URL.RawQuery = query.Encode()
+	preview := RequestPreview(masked)
+	result, callErr := New(client).do(req)
+	result.Request = &preview
+	return result, callErr
 }
 
 func (e *Executor) do(req *http.Request) (Result, error) {
+	var sent atomic.Bool
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{WroteHeaders: func() { sent.Store(true) }}))
 	response, err := e.client.Do(req)
 	if err != nil {
-		return Result{}, fmt.Errorf("provider request failed: %w", err)
+		var u *url.Error
+		if errors.As(err, &u) {
+			err = u.Err
+		}
+		return Result{}, &RequestFailure{Sent: sent.Load(), Err: err}
 	}
 	defer response.Body.Close()
 	// ponytail: action responses are buffered up to 4 MiB; add file streaming only when a real action needs it.
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxProviderResponse+1))
+	result := Result{Status: response.StatusCode, Header: response.Header.Clone(), Body: body}
 	if err != nil {
-		return Result{}, fmt.Errorf("read provider response: %w", err)
+		return result, &RequestFailure{Sent: true, Err: fmt.Errorf("read provider response: %w", err)}
 	}
 	if len(body) > maxProviderResponse {
-		return Result{}, errors.New("provider response exceeds 4 MiB")
+		result.Body = nil
+		return result, errors.New("provider response exceeds 4 MiB")
 	}
-	return Result{Status: response.StatusCode, Header: response.Header.Clone(), Body: body}, nil
+	return result, nil
 }
 
 func expandPath(pattern string, input map[string]any) (string, map[string]any, error) {
@@ -183,7 +246,14 @@ func joinTarget(base, endpoint string) (*url.URL, error) {
 	if err != nil {
 		return nil, errors.New("provider endpoint is invalid")
 	}
-	return baseURL.ResolveReference(reference), nil
+	if (baseURL.Scheme != "http" && baseURL.Scheme != "https") || baseURL.User != nil || baseURL.RawQuery != "" || baseURL.Fragment != "" {
+		return nil, errors.New("invalid base URL")
+	}
+	escaped := strings.TrimRight(baseURL.EscapedPath(), "/") + reference.EscapedPath()
+	baseURL.Path = strings.TrimRight(baseURL.Path, "/") + reference.Path
+	baseURL.RawPath = escaped
+	baseURL.RawQuery = reference.RawQuery
+	return baseURL, nil
 }
 
 func addQuery(target *url.URL, values map[string]any) {

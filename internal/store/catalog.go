@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 )
 
 func (s *Store) ListSystemGroups(ctx context.Context) ([]model.SystemGroup, error) {
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.database(ctx).Query(ctx, `
 		SELECT id::text, name, sort_order, created_at, updated_at
 		FROM system_groups
 		WHERE workspace_id = $1 AND deleted_at IS NULL
@@ -36,7 +37,7 @@ func (s *Store) SaveSystemGroup(ctx context.Context, item model.SystemGroup) (mo
 	if item.ID == "" {
 		item.ID = StableID("system-group-custom", s.workspaceID+":"+strings.ToLower(item.Name))
 	}
-	err := s.pool.QueryRow(ctx, `
+	err := s.database(ctx).QueryRow(ctx, `
 		INSERT INTO system_groups(id, workspace_id, name, sort_order)
 		VALUES($1, $2, $3, $4)
 		ON CONFLICT(id) DO UPDATE SET
@@ -49,7 +50,7 @@ func (s *Store) SaveSystemGroup(ctx context.Context, item model.SystemGroup) (mo
 }
 
 func (s *Store) DeleteSystemGroup(ctx context.Context, id string) error {
-	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	return s.withTx(ctx, func(tx pgx.Tx) error {
 		var used bool
 		if err := tx.QueryRow(ctx, `
 			SELECT EXISTS(
@@ -76,7 +77,7 @@ func (s *Store) DeleteSystemGroup(ctx context.Context, id string) error {
 
 func (s *Store) ListSystems(ctx context.Context, options ...ListOptions) ([]model.System, error) {
 	o := listOptions(options)
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.database(ctx).Query(ctx, `
 		SELECT
 			s.id::text, s.system_key, s.name, s.source,
 			COALESCE(s.group_id::text, ''), COALESCE(g.name, ''), s.description,
@@ -87,6 +88,8 @@ func (s *Store) ListSystems(ctx context.Context, options ...ListOptions) ([]mode
 				FROM system_auth_templates sat
 				WHERE sat.workspace_id = s.workspace_id AND sat.system_id = s.id
 			), '{}'::text[]),
+			COALESCE((SELECT sat.auth_template_id::text FROM system_auth_templates sat
+				WHERE sat.workspace_id = s.workspace_id AND sat.system_id = s.id AND sat.is_default), ''),
 			(SELECT count(*) FROM actions a WHERE a.workspace_id = s.workspace_id AND a.system_id = s.id AND a.deleted_at IS NULL),
 			(SELECT count(*) FROM actions a WHERE a.workspace_id = s.workspace_id AND a.system_id = s.id AND a.executable AND a.status = 'active' AND a.deleted_at IS NULL),
 			(SELECT count(*) FROM connections c JOIN integrations i ON i.id = c.integration_id
@@ -118,14 +121,16 @@ func (s *Store) ListSystems(ctx context.Context, options ...ListOptions) ([]mode
 }
 
 func (s *Store) System(ctx context.Context, idOrKey string) (model.System, error) {
-	row := s.pool.QueryRow(ctx, `
+	row := s.database(ctx).QueryRow(ctx, `
 		SELECT
 			s.id::text, s.system_key, s.name, s.source,
 			COALESCE(s.group_id::text, ''), COALESCE(g.name, ''), s.description,
 			COALESCE(s.homepage_url, ''), COALESCE(s.icon_key, ''), s.status,
 			COALESCE(s.catalog_version, ''), s.version, s.created_at, s.updated_at,
 			COALESCE((SELECT array_agg(sat.auth_template_id::text ORDER BY sat.auth_template_id::text)
-			 FROM system_auth_templates sat WHERE sat.workspace_id = s.workspace_id AND sat.system_id = s.id), '{}'::text[]),
+				 FROM system_auth_templates sat WHERE sat.workspace_id = s.workspace_id AND sat.system_id = s.id), '{}'::text[]),
+			COALESCE((SELECT sat.auth_template_id::text FROM system_auth_templates sat
+				WHERE sat.workspace_id = s.workspace_id AND sat.system_id = s.id AND sat.is_default), ''),
 			(SELECT count(*) FROM actions a WHERE a.workspace_id = s.workspace_id AND a.system_id = s.id AND a.deleted_at IS NULL),
 			(SELECT count(*) FROM actions a WHERE a.workspace_id = s.workspace_id AND a.system_id = s.id AND a.executable AND a.status = 'active' AND a.deleted_at IS NULL),
 			(SELECT count(*) FROM connections c JOIN integrations i ON i.id = c.integration_id
@@ -145,7 +150,7 @@ func scanSystem(row rowScanner) (model.System, error) {
 	err := row.Scan(
 		&item.ID, &item.SystemKey, &item.Name, &item.Source, &item.GroupID, &item.GroupName,
 		&item.Description, &item.HomepageURL, &item.IconKey, &item.Status, &item.CatalogVersion,
-		&item.Version, &item.CreatedAt, &item.UpdatedAt, &item.AuthTemplateIDs,
+		&item.Version, &item.CreatedAt, &item.UpdatedAt, &item.AuthTemplateIDs, &item.DefaultAuthTemplateID,
 		&item.ActionCount, &item.ExecutableCount, &item.ConnectionCount,
 	)
 	return item, err
@@ -155,7 +160,14 @@ func (s *Store) CreateSystem(ctx context.Context, item model.System, defaultAuth
 	item.ID = StableID("system-custom", s.workspaceID+":"+item.SystemKey)
 	item.Source = "custom"
 	item.Status = "active"
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	templateIDs := item.AuthTemplateIDs
+	if len(templateIDs) == 0 {
+		templateIDs = []string{defaultAuthTemplateID}
+	}
+	if !slices.Contains(templateIDs, defaultAuthTemplateID) {
+		return model.System{}, fmt.Errorf("%w: default auth template must be supported", ErrConflict)
+	}
+	err := s.withTx(ctx, func(tx pgx.Tx) error {
 		var groupExists, templateExists bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM system_groups WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL)`, s.workspaceID, item.GroupID).Scan(&groupExists); err != nil {
 			return err
@@ -163,9 +175,11 @@ func (s *Store) CreateSystem(ctx context.Context, item model.System, defaultAuth
 		if !groupExists {
 			return fmt.Errorf("%w: system group not found", ErrNotFound)
 		}
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM auth_templates WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL AND status = 'published')`, s.workspaceID, defaultAuthTemplateID).Scan(&templateExists); err != nil {
+		var templateCount int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM auth_templates WHERE workspace_id = $1 AND id = ANY($2::uuid[]) AND deleted_at IS NULL AND status = 'published'`, s.workspaceID, templateIDs).Scan(&templateCount); err != nil {
 			return err
 		}
+		templateExists = templateCount == len(templateIDs)
 		if !templateExists {
 			return fmt.Errorf("%w: auth template not found", ErrNotFound)
 		}
@@ -175,11 +189,15 @@ func (s *Store) CreateSystem(ctx context.Context, item model.System, defaultAuth
 			item.ID, s.workspaceID, item.SystemKey, item.Name, item.GroupID, item.Description, item.HomepageURL, item.IconKey); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `
-			INSERT INTO system_auth_templates(id, workspace_id, system_id, auth_template_id, is_default)
-			VALUES($1, $2, $3, $4, true)`, StableID("system-auth", item.ID+":"+defaultAuthTemplateID),
-			s.workspaceID, item.ID, defaultAuthTemplateID)
-		return err
+		for _, templateID := range templateIDs {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO system_auth_templates(id, workspace_id, system_id, auth_template_id, is_default)
+				VALUES($1, $2, $3, $4, $5)`, StableID("system-auth", item.ID+":"+templateID),
+				s.workspaceID, item.ID, templateID, templateID == defaultAuthTemplateID); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return model.System{}, err
@@ -188,7 +206,7 @@ func (s *Store) CreateSystem(ctx context.Context, item model.System, defaultAuth
 }
 
 func (s *Store) UpdateSystemGroup(ctx context.Context, systemID, groupID string) (model.System, error) {
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	err := s.withTx(ctx, func(tx pgx.Tx) error {
 		var groupExists bool
 		if err := tx.QueryRow(ctx, `
 			SELECT EXISTS(
@@ -218,8 +236,8 @@ func (s *Store) UpdateSystemGroup(ctx context.Context, systemID, groupID string)
 	return s.System(ctx, systemID)
 }
 
-func (s *Store) SetSystemAuthTemplates(ctx context.Context, systemID string, templateIDs []string) error {
-	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+func (s *Store) SetSystemAuthTemplates(ctx context.Context, systemID string, templateIDs []string, defaultAuthTemplateID string) error {
+	return s.withTx(ctx, func(tx pgx.Tx) error {
 		var systemExists bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM systems WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL)`, s.workspaceID, systemID).Scan(&systemExists); err != nil {
 			return err
@@ -237,6 +255,19 @@ func (s *Store) SetSystemAuthTemplates(ctx context.Context, systemID string, tem
 		if count != len(templateIDs) {
 			return fmt.Errorf("%w: one or more auth templates are invalid", ErrNotFound)
 		}
+		if defaultAuthTemplateID == "" {
+			if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT auth_template_id::text FROM system_auth_templates
+				WHERE workspace_id = $1 AND system_id = $2 AND is_default), '')`,
+				s.workspaceID, systemID).Scan(&defaultAuthTemplateID); err != nil {
+				return err
+			}
+			if !slices.Contains(templateIDs, defaultAuthTemplateID) {
+				defaultAuthTemplateID = templateIDs[0]
+			}
+		}
+		if !slices.Contains(templateIDs, defaultAuthTemplateID) {
+			return fmt.Errorf("%w: default auth template must be supported", ErrConflict)
+		}
 		var incompatibleInstances int
 		if err := tx.QueryRow(ctx, `
 			SELECT count(*) FROM auth_instances
@@ -251,11 +282,11 @@ func (s *Store) SetSystemAuthTemplates(ctx context.Context, systemID string, tem
 		if _, err := tx.Exec(ctx, `DELETE FROM system_auth_templates WHERE workspace_id = $1 AND system_id = $2`, s.workspaceID, systemID); err != nil {
 			return err
 		}
-		for index, templateID := range templateIDs {
+		for _, templateID := range templateIDs {
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO system_auth_templates(id, workspace_id, system_id, auth_template_id, is_default)
 				VALUES($1, $2, $3, $4, $5)`, StableID("system-auth", systemID+":"+templateID),
-				s.workspaceID, systemID, templateID, index == 0); err != nil {
+				s.workspaceID, systemID, templateID, templateID == defaultAuthTemplateID); err != nil {
 				return err
 			}
 		}
@@ -266,12 +297,12 @@ func (s *Store) SetSystemAuthTemplates(ctx context.Context, systemID string, tem
 func (s *Store) ListActions(ctx context.Context, query, systemID string, options ...ListOptions) ([]model.ActionDefinition, error) {
 	query = strings.TrimSpace(query)
 	o := listOptions(options)
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.database(ctx).Query(ctx, `
 		SELECT a.id::text, a.action_key, a.name, a.description, a.source,
 		       a.system_id::text, s.system_key, COALESCE(a.integration_id::text, ''),
 		       a.http_method, a.relative_path, a.required_scopes,
 		       a.input_schema, a.output_schema, a.example_input,
-		       a.executable, a.status, a.version, a.created_at, a.updated_at
+		       a.executable, a.status, a.version, a.created_at, a.updated_at, a.request_config, a.response_config, a.execution_config
 		FROM actions a
 		JOIN systems s ON s.id = a.system_id AND s.workspace_id = a.workspace_id
 		WHERE a.workspace_id = $1 AND a.deleted_at IS NULL
@@ -291,7 +322,7 @@ func (s *Store) ListActions(ctx context.Context, query, systemID string, options
 			&item.SystemID, &item.SystemKey, &item.IntegrationID, &item.HTTPMethod,
 			&item.RelativePath, &item.RequiredScopes, &item.InputSchema, &item.OutputSchema,
 			&item.ExampleInput, &item.Executable, &item.Status, &item.Version,
-			&item.CreatedAt, &item.UpdatedAt,
+			&item.CreatedAt, &item.UpdatedAt, &item.RequestConfig, &item.ResponseConfig, &item.ExecutionConfig,
 		); err != nil {
 			return nil, err
 		}
@@ -302,29 +333,29 @@ func (s *Store) ListActions(ctx context.Context, query, systemID string, options
 
 func (s *Store) Action(ctx context.Context, idOrKey string) (model.ActionDefinition, error) {
 	var item model.ActionDefinition
-	err := s.pool.QueryRow(ctx, `
+	err := s.database(ctx).QueryRow(ctx, `
 		SELECT a.id::text, a.action_key, a.name, a.description, a.source,
 		       a.system_id::text, s.system_key, COALESCE(a.integration_id::text, ''),
 		       a.http_method, a.relative_path, a.required_scopes,
 		       a.input_schema, a.output_schema, a.example_input,
-		       a.executable, a.status, a.version, a.created_at, a.updated_at
+		       a.executable, a.status, a.version, a.created_at, a.updated_at, a.request_config, a.response_config, a.execution_config
 		FROM actions a
 		JOIN systems s ON s.id = a.system_id AND s.workspace_id = a.workspace_id
-		WHERE a.workspace_id = $1 AND a.deleted_at IS NULL AND (a.id::text = $2 OR a.action_key = $2)`,
+		WHERE a.workspace_id = $1 AND a.deleted_at IS NULL AND (a.id::text = $2 OR s.system_key||'.'||a.action_key=$2 OR (a.action_key=$2 AND (SELECT count(*) FROM actions x WHERE x.workspace_id=$1 AND x.action_key=$2 AND x.deleted_at IS NULL)=1))`,
 		s.workspaceID, idOrKey,
 	).Scan(
 		&item.ID, &item.ActionKey, &item.Name, &item.Description, &item.Source,
 		&item.SystemID, &item.SystemKey, &item.IntegrationID, &item.HTTPMethod,
 		&item.RelativePath, &item.RequiredScopes, &item.InputSchema, &item.OutputSchema,
 		&item.ExampleInput, &item.Executable, &item.Status, &item.Version,
-		&item.CreatedAt, &item.UpdatedAt,
+		&item.CreatedAt, &item.UpdatedAt, &item.RequestConfig, &item.ResponseConfig, &item.ExecutionConfig,
 	)
 	return item, mapNotFound(err)
 }
 
 func (s *Store) SaveAction(ctx context.Context, item model.ActionDefinition) (model.ActionDefinition, error) {
 	if item.ID == "" {
-		item.ID = StableID("action-custom", s.workspaceID+":"+item.ActionKey)
+		item.ID = StableID("action-custom", s.workspaceID+":"+item.SystemID+":"+item.ActionKey)
 	}
 	if item.Name == "" {
 		item.Name = item.ActionKey
@@ -334,27 +365,17 @@ func (s *Store) SaveAction(ctx context.Context, item model.ActionDefinition) (mo
 	}
 	item.Source = "custom"
 	item.Executable = true
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		var systemID string
-		if item.IntegrationID != "" {
-			if err := tx.QueryRow(ctx, `SELECT system_id::text FROM integrations WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`, s.workspaceID, item.IntegrationID).Scan(&systemID); err != nil {
-				return mapNotFound(err)
-			}
-			if item.SystemID != "" && item.SystemID != systemID {
-				return fmt.Errorf("%w: integration and system mismatch", ErrConflict)
-			}
-			item.SystemID = systemID
-		}
+	err := s.withTx(ctx, func(tx pgx.Tx) error {
 		if item.SystemID == "" {
 			return fmt.Errorf("%w: system is required", ErrConflict)
 		}
-		_, err := tx.Exec(ctx, `
+		command, err := tx.Exec(ctx, `
 			INSERT INTO actions(
 				id, workspace_id, action_key, name, description, source, system_id, integration_id,
 				http_method, relative_path, required_scopes, input_schema, output_schema,
-				example_input, executable, status
+				example_input, executable, status, request_config, response_config, execution_config
 			) VALUES($1, $2, $3, $4, $5, 'custom', $6, NULLIF($7, '')::uuid,
-			         $8, $9, $10, $11, $12, $13, true, $14)
+			         $8, $9, $10, $11, $12, $13, true, $14, $15, $16, $17)
 			ON CONFLICT(id) DO UPDATE SET
 				action_key = EXCLUDED.action_key, name = EXCLUDED.name,
 				description = EXCLUDED.description, system_id = EXCLUDED.system_id,
@@ -362,11 +383,15 @@ func (s *Store) SaveAction(ctx context.Context, item model.ActionDefinition) (mo
 				relative_path = EXCLUDED.relative_path, required_scopes = EXCLUDED.required_scopes,
 				input_schema = EXCLUDED.input_schema, output_schema = EXCLUDED.output_schema,
 				example_input = EXCLUDED.example_input, status = EXCLUDED.status,
+ request_config=EXCLUDED.request_config,response_config=EXCLUDED.response_config,execution_config=EXCLUDED.execution_config,
 				version = actions.version + 1, updated_at = now()
-			WHERE actions.workspace_id = EXCLUDED.workspace_id AND actions.source = 'custom'`,
+			WHERE actions.workspace_id = EXCLUDED.workspace_id AND actions.source = 'custom' AND actions.version=$18 AND actions.deleted_at IS NULL`,
 			item.ID, s.workspaceID, item.ActionKey, item.Name, item.Description, item.SystemID,
-			item.IntegrationID, strings.ToUpper(item.HTTPMethod), item.RelativePath, item.RequiredScopes,
-			jsonOrObject(item.InputSchema), jsonOrObject(item.OutputSchema), jsonOrObject(item.ExampleInput), item.Status)
+			"", strings.ToUpper(item.HTTPMethod), item.RelativePath, item.RequiredScopes,
+			jsonOrObject(item.InputSchema), jsonOrObject(item.OutputSchema), jsonOrObject(item.ExampleInput), item.Status, jsonOrObject(item.RequestConfig), jsonOrObject(item.ResponseConfig), jsonOrObject(item.ExecutionConfig), item.Version)
+		if err == nil && command.RowsAffected() == 0 {
+			return ErrConflict
+		}
 		return err
 	})
 	if err != nil {

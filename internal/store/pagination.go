@@ -9,6 +9,8 @@ import (
 )
 
 type ListOptions struct {
+	SystemKey     string
+	ActionID      string
 	Limit         int
 	Before        time.Time
 	ID            string
@@ -20,6 +22,7 @@ type ListOptions struct {
 	IntegrationID string
 	ConnectionID  string
 	SyncTaskID    string
+	WorkflowID    string
 	From          time.Time
 	To            time.Time
 }

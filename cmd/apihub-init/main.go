@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"os"
 	"time"
@@ -12,6 +13,8 @@ import (
 )
 
 func main() {
+	migrateOnly := flag.Bool("migrate-only", false, "apply schema migrations without updating catalog or users")
+	flag.Parse()
 	databaseURL := os.Getenv("APIHUB_MIGRATION_DATABASE_URL")
 	if databaseURL == "" {
 		databaseURL = os.Getenv("APIHUB_DATABASE_URL")
@@ -29,6 +32,10 @@ func main() {
 	defer database.Close()
 	if err := database.Migrate(ctx); err != nil {
 		log.Fatal(err)
+	}
+	if *migrateOnly {
+		log.Print("APIHub schema migrations applied")
+		return
 	}
 	providerCatalog, err := catalog.Load(os.Getenv("APIHUB_CATALOG_DIR"))
 	if err != nil {

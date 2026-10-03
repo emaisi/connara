@@ -1,7 +1,7 @@
 import { PageErrorBoundary } from "./error-boundary";
 import { InvitationPage } from "./pages/invitation";
 import { lazy, Suspense } from "react";
-import { Navigate, Route, Routes } from "react-router";
+import { Navigate, Route, Routes, useSearchParams } from "react-router";
 import { DemoProvider } from "./demo";
 import { Shell } from "./shell";
 
@@ -9,9 +9,6 @@ const AuthMethodsPage = lazy(() =>
   import("./pages/auth-methods").then((module) => ({ default: module.AuthMethodsPage })),
 );
 const DemoActionsPage = lazy(() => import("./pages/actions").then((module) => ({ default: module.DemoActionsPage })));
-const DemoConnectionsPage = lazy(() =>
-  import("./pages/connections").then((module) => ({ default: module.DemoConnectionsPage })),
-);
 const DemoIntegrationsPage = lazy(() =>
   import("./pages/integrations").then((module) => ({ default: module.DemoIntegrationsPage })),
 );
@@ -25,6 +22,7 @@ const GettingStartedPage = lazy(() =>
   import("./pages/getting-started").then((module) => ({ default: module.GettingStartedPage })),
 );
 const SyncTasksPage = lazy(() => import("./pages/sync-tasks").then((module) => ({ default: module.SyncTasksPage })));
+const WorkflowsPage = lazy(() => import("./pages/workflows").then((module) => ({ default: module.WorkflowsPage })));
 const OperationsPage = lazy(() =>
   import("./pages/demo-operations").then((module) => ({ default: module.OperationsPage })),
 );
@@ -38,6 +36,13 @@ const PlatformSettingsPage = lazy(() =>
 );
 const ResourcesPage = lazy(() => import("./pages/demo-platform").then((module) => ({ default: module.ResourcesPage })));
 const TeamPage = lazy(() => import("./pages/demo-platform").then((module) => ({ default: module.TeamPage })));
+function LegacyAccountsRedirect() {
+  const [params] = useSearchParams();
+  const target = new URLSearchParams(params);
+  target.set("section", "accounts");
+  return <Navigate to={`/auth?${target}`} replace />;
+}
+
 export function App() {
   return (
     <PageErrorBoundary>
@@ -52,10 +57,11 @@ export function App() {
               <Route path="auth" element={<AuthMethodsPage />} />
               <Route path="auth-methods" element={<Navigate to="/auth" replace />} />
               <Route path="integrations" element={<DemoIntegrationsPage />} />
-              <Route path="connections" element={<DemoConnectionsPage />} />
+              <Route path="connections" element={<LegacyAccountsRedirect />} />
               <Route path="oauth-apps" element={<Navigate to="/auth" replace />} />
               <Route path="actions" element={<DemoActionsPage />} />
               <Route path="sync" element={<SyncTasksPage />} />
+              <Route path="workflows" element={<WorkflowsPage />} />
               <Route path="functions" element={<Navigate to="/sync" replace />} />
               <Route path="webhooks" element={<WebhooksPage />} />
               <Route path="access" element={<DemoAccessPage />} />

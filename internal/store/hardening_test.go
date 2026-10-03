@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -96,6 +97,79 @@ func TestSchedulerAndSyncCommitAreAtomicAndFenced(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRequestTransactionRollsBackLateAuditFailure(t *testing.T) {
+	db := testutil.Database(t)
+	ctx := context.Background()
+	name := "rollback-" + testutil.ID("group")
+	errAudit := errors.New("audit unavailable")
+	err := db.InTransaction(ctx, func(txctx context.Context) error {
+		if _, err := db.SaveSystemGroup(txctx, model.SystemGroup{Name: name}); err != nil {
+			return err
+		}
+		if !db.AbortTransaction(txctx, errAudit) {
+			t.Fatal("transaction was not visible in request context")
+		}
+		return nil
+	})
+	if !errors.Is(err, errAudit) {
+		t.Fatalf("expected audit failure, got %v", err)
+	}
+	groups, err := db.ListSystemGroups(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range groups {
+		if group.Name == name {
+			t.Fatal("business mutation committed without audit")
+		}
+	}
+}
+
+func TestJobClaimsCanBeSeparatedByKind(t *testing.T) {
+	db := testutil.Database(t)
+	ctx := context.Background()
+	for _, kind := range []string{"sync_run", "webhook_delivery"} {
+		testutil.Exec(t, db, `INSERT INTO jobs(id,workspace_id,kind,payload,status,max_attempts,run_after) VALUES($1,$2,$3,'{}','queued',3,now())`, testutil.ID(kind), db.WorkspaceID(), kind)
+	}
+	jobs, err := db.ClaimJobsByKinds(ctx, "webhook-worker", 1, []string{"webhook_delivery"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].Kind != "webhook_delivery" {
+		t.Fatalf("unexpected claimed jobs: %#v", jobs)
+	}
+}
+
+func TestMetricsUseHourlyRollupsForClosedBuckets(t *testing.T) {
+	db := testutil.Database(t)
+	ctx := context.Background()
+	started := time.Now().UTC().Add(-3 * time.Hour)
+	for index, status := range []string{"success", "failed"} {
+		run := model.OperationRun{
+			ID: testutil.ID(fmt.Sprintf("metrics-%d", index)), RequestID: testutil.ID("request"),
+			Kind: "action", Name: "metrics", Status: "running", Source: "test",
+			StartedAt: started.Add(time.Duration(index) * time.Second), ExpiresAt: time.Now().Add(time.Hour),
+		}
+		if err := db.CreateOperation(ctx, run); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.CompleteOperation(ctx, run.ID, status, 200, nil, "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	metrics, err := db.Metrics(ctx, time.Now().UTC().Add(-4*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metrics.Requests != 2 || metrics.Successes != 1 || metrics.Failures != 1 {
+		t.Fatalf("unexpected metrics: %#v", metrics)
+	}
+	var rows int
+	if err := db.Pool().QueryRow(ctx, `SELECT count(*) FROM metric_hourly WHERE workspace_id=$1`, db.WorkspaceID()).Scan(&rows); err != nil || rows == 0 {
+		t.Fatalf("hourly metrics were not materialized: rows=%d err=%v", rows, err)
+	}
+}
 func TestSyncInvalidRecordRollsBackCheckpoint(t *testing.T) {
 	db := testutil.Database(t)
 	f := testutil.Seed(t, db)
@@ -121,8 +195,16 @@ func TestAuthBindingCASAndRotation(t *testing.T) {
 	ctx := context.Background()
 	changed := f.Integration
 	changed.BaseURL = "https://other.example.test"
-	if _, err := db.SaveIntegration(ctx, changed); !errors.Is(err, store.ErrConflict) {
-		t.Fatalf("rebound existing credentials: %v", err)
+	updatedTarget, err := db.SaveIntegration(ctx, changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := db.Connection(ctx, f.Connection.ID)
+	if err != nil || account.Status != "pending" || updatedTarget.TargetVersion != changed.TargetVersion+1 {
+		t.Fatalf("target change must invalidate verification: %+v %v", account, err)
+	}
+	if _, err := db.MarkConnectionVerifiedVersion(ctx, account.ID, account.Revision, changed.TargetVersion); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("stale target verification accepted: %v", err)
 	}
 	f.Auth.Name = "updated"
 	updated, err := db.SaveAuthInstance(ctx, f.Auth)
@@ -159,7 +241,15 @@ func TestIdempotencyCleanupPreservesUnknownAndActiveJobs(t *testing.T) {
 	db := testutil.Database(t)
 	ctx := context.Background()
 	f := testutil.Seed(t, db)
-	record := model.IdempotencyRecord{ID: testutil.ID("idem"), RuntimeTokenID: testutil.ID("token"), Scope: "test", Key: "key", Fingerprint: "fingerprint", ExpiresAt: time.Now().Add(-time.Hour)}
+	var adminID string
+	if err := db.Pool().QueryRow(ctx, `SELECT user_id::text FROM workspace_members WHERE workspace_id=$1 AND role='owner' LIMIT 1`, db.WorkspaceID()).Scan(&adminID); err != nil {
+		t.Fatal(err)
+	}
+	tokenID := testutil.ID("token")
+	if err := db.CreateRuntimeToken(ctx, model.RuntimeToken{ID: tokenID, Name: "test", TokenPrefix: "test", TokenHash: fmt.Sprintf("%064s", strings.ReplaceAll(tokenID, "-", "")), CreatedBy: adminID}); err != nil {
+		t.Fatal(err)
+	}
+	record := model.IdempotencyRecord{ID: testutil.ID("idem"), RuntimeTokenID: tokenID, Scope: "test", Key: "key", Fingerprint: "fingerprint", ExpiresAt: time.Now().Add(-time.Hour)}
 	if _, created, err := db.ClaimIdempotency(ctx, record); err != nil || !created {
 		t.Fatal(err)
 	}
@@ -180,6 +270,13 @@ func TestIdempotencyCleanupPreservesUnknownAndActiveJobs(t *testing.T) {
 	existing, created, err := db.ClaimIdempotency(ctx, record)
 	if err != nil || created || existing.Status != "unknown" {
 		t.Fatalf("unsafe replay: %v %v %v", existing, created, err)
+	}
+
+	if _, err := db.CleanupExpired(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, created, err := db.ClaimIdempotency(ctx, record); err != nil || created {
+		t.Fatalf("unknown tombstone removed on later cleanup: %v %v", created, err)
 	}
 	if err := db.ReleaseIdempotency(ctx, record.ID); err != nil {
 		t.Fatal(err)

@@ -186,7 +186,7 @@ web/                      # React 管理台源码
 ## 9. 安全与部署
 
 - Integration、Token、Webhook 地址必须为 HTTPS；本地回调只允许 localhost/loopback HTTP。
-- 默认阻断私网、环回、链路本地、保留和组播地址；企业内网只通过 `APIHUB_ALLOWED_PRIVATE_CIDRS` 精确放行。
+- 默认阻断私网、环回、链路本地、保留和组播地址。控制台认证实例中配置的 Token、刷新端点及 OIDC issuer 按协议、主机和端口自动授权，仅用于该实例的认证请求及同源凭据验证；不同源重定向仍被拒绝。其他内网上游请求通过 `APIHUB_ALLOWED_PRIVATE_CIDRS` 精确放行。
 - 动作只能保存安全相对路径，不能覆盖目标主机。
 - 自定义认证不执行脚本，只允许最多 16 条受控注入规则；阻止 Host、Content-Length 等危险 Header。
 - 控制面使用账号会话，运行面使用独立 Token；日志不记录 Cookie、Authorization、密码或凭据正文。

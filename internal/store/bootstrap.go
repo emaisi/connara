@@ -42,6 +42,10 @@ var builtinAuthTemplates = []builtinAuthTemplate{
 	{Key: "mtls", Name: "mTLS 双向证书", Flow: "mtls", CredentialSchema: fields(field("certificate", "客户端证书", true), field("private_key", "私钥", true)), TokenRequest: map[string]any{}, InjectionRules: []any{}},
 	{Key: "oidc", Name: "OIDC / 企业 SSO", Flow: "oidc", CredentialSchema: fields(), TokenRequest: map[string]any{}, InjectionRules: rules(rule("header", "Authorization", "Bearer {{access_token}}"))},
 	{Key: "jwt", Name: "JWT 服务账号", Flow: "jwt", CredentialSchema: fields(field("issuer", "Issuer", false), field("private_key", "私钥", true)), TokenRequest: map[string]any{}, InjectionRules: rules(rule("header", "Authorization", "Bearer {{jwt}}"))},
+	{Key: "jwt-direct", Name: "JWT 服务账号 · 直接签发", Flow: "jwt_direct", CredentialSchema: fields(field("issuer", "Issuer", false), field("private_key", "私钥", true)), TokenRequest: map[string]any{}, InjectionRules: []any{}},
+	{Key: "jwt-bearer-grant", Name: "JWT 服务账号 · 换取令牌", Flow: "jwt_bearer_grant", CredentialSchema: fields(field("issuer", "Issuer", false), field("private_key", "私钥", true)), TokenRequest: map[string]any{"method": "POST", "bodyType": "form"}, InjectionRules: rules(rule("header", "Authorization", "Bearer {{access_token}}"))},
+	{Key: "aws-sigv4", Name: "AWS SigV4", Flow: "aws_sigv4", CredentialSchema: fields(field("access_key_id", "Access Key ID", false), field("secret_access_key", "Secret Access Key", true), field("session_token", "Session Token", true)), TokenRequest: map[string]any{}, InjectionRules: []any{}},
+	{Key: "oauth2-token-exchange", Name: "OAuth 2.0 Token Exchange", Flow: "token_exchange", CredentialSchema: fields(field("subject_token", "Subject Token", true)), TokenRequest: map[string]any{"method": "POST", "bodyType": "form"}, InjectionRules: rules(rule("header", "Authorization", "Bearer {{access_token}}"))},
 	{Key: "saml-token-exchange", Name: "SAML / Token Exchange", Flow: "token_exchange", CredentialSchema: fields(field("assertion", "SAML Assertion", true)), TokenRequest: map[string]any{"method": "POST", "bodyType": "form"}, InjectionRules: rules(rule("header", "Authorization", "Bearer {{access_token}}"))},
 	{Key: "kerberos", Name: "Kerberos / NTLM 网关", Flow: "gateway", CredentialSchema: fields(field("gateway_token", "网关令牌", true)), TokenRequest: map[string]any{}, InjectionRules: rules(rule("header", "Authorization", "Negotiate {{gateway_token}}"))},
 }
@@ -61,7 +65,7 @@ func rule(target, name, template string) map[string]any {
 func rules(values ...map[string]any) []map[string]any { return values }
 
 func (s *Store) Bootstrap(ctx context.Context, input BootstrapInput) error {
-	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	return s.withTx(ctx, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, input.WorkspaceID+":bootstrap"); err != nil {
 			return err
 		}
@@ -189,7 +193,7 @@ func (s *Store) Bootstrap(ctx context.Context, input BootstrapInput) error {
 						http_method, relative_path, required_scopes, input_schema, output_schema,
 						executable, status, catalog_version
 					) VALUES($1, $2, $3, $4, $5, 'imported', $6, $7, $8, $9, $10, $11, $12, 'active', 'startup')
-					ON CONFLICT(workspace_id, action_key) WHERE deleted_at IS NULL DO UPDATE SET
+					ON CONFLICT(workspace_id, system_id, action_key) WHERE deleted_at IS NULL DO UPDATE SET
 						name = EXCLUDED.name, description = EXCLUDED.description,
 						http_method = EXCLUDED.http_method, relative_path = EXCLUDED.relative_path,
 						required_scopes = EXCLUDED.required_scopes, input_schema = EXCLUDED.input_schema,

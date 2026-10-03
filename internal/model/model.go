@@ -40,8 +40,11 @@ type Action struct {
 }
 
 type HTTPActionRuntime struct {
-	Method string `json:"method"`
-	Path   string `json:"path"`
+	RequestConfig   json.RawMessage `json:"requestConfig,omitempty"`
+	ResponseConfig  json.RawMessage `json:"responseConfig,omitempty"`
+	ExecutionConfig json.RawMessage `json:"executionConfig,omitempty"`
+	Method          string          `json:"method"`
+	Path            string          `json:"path"`
 }
 
 type Workspace struct {
@@ -63,24 +66,25 @@ type SystemGroup struct {
 }
 
 type System struct {
-	ID              string    `json:"id"`
-	SystemKey       string    `json:"systemKey"`
-	Name            string    `json:"name"`
-	Source          string    `json:"source"`
-	GroupID         string    `json:"groupId,omitempty"`
-	GroupName       string    `json:"groupName,omitempty"`
-	Description     string    `json:"description"`
-	HomepageURL     string    `json:"homepageUrl,omitempty"`
-	IconKey         string    `json:"iconKey,omitempty"`
-	Status          string    `json:"status"`
-	CatalogVersion  string    `json:"catalogVersion,omitempty"`
-	AuthTemplateIDs []string  `json:"authTemplateIds"`
-	ActionCount     int       `json:"actionCount"`
-	ExecutableCount int       `json:"executableCount"`
-	ConnectionCount int       `json:"connectionCount"`
-	Version         int64     `json:"version"`
-	CreatedAt       time.Time `json:"createdAt"`
-	UpdatedAt       time.Time `json:"updatedAt"`
+	ID                    string    `json:"id"`
+	SystemKey             string    `json:"systemKey"`
+	Name                  string    `json:"name"`
+	Source                string    `json:"source"`
+	GroupID               string    `json:"groupId,omitempty"`
+	GroupName             string    `json:"groupName,omitempty"`
+	Description           string    `json:"description"`
+	HomepageURL           string    `json:"homepageUrl,omitempty"`
+	IconKey               string    `json:"iconKey,omitempty"`
+	Status                string    `json:"status"`
+	CatalogVersion        string    `json:"catalogVersion,omitempty"`
+	AuthTemplateIDs       []string  `json:"authTemplateIds"`
+	DefaultAuthTemplateID string    `json:"defaultAuthTemplateId,omitempty"`
+	ActionCount           int       `json:"actionCount"`
+	ExecutableCount       int       `json:"executableCount"`
+	ConnectionCount       int       `json:"connectionCount"`
+	Version               int64     `json:"version"`
+	CreatedAt             time.Time `json:"createdAt"`
+	UpdatedAt             time.Time `json:"updatedAt"`
 }
 
 type AuthTemplate struct {
@@ -125,6 +129,8 @@ type AuthInstance struct {
 }
 
 type Integration struct {
+	AuthFlow       string          `json:"authFlow"`
+	TargetVersion  int64           `json:"targetVersion"`
 	ID             string          `json:"id"`
 	WorkspaceID    string          `json:"-"`
 	IntegrationKey string          `json:"integrationKey"`
@@ -153,53 +159,59 @@ type EndUser struct {
 }
 
 type Connection struct {
-	ID               string          `json:"id"`
-	WorkspaceID      string          `json:"-"`
-	ConnectionKey    string          `json:"connectionKey"`
-	Name             string          `json:"name"`
-	IntegrationID    string          `json:"integrationId"`
-	IntegrationKey   string          `json:"integrationKey"`
-	SystemKey        string          `json:"systemKey"`
-	AuthInstanceID   string          `json:"authInstanceId"`
-	EndUserID        string          `json:"endUserId"`
-	EndUserKey       string          `json:"endUserKey"`
-	EndUserName      string          `json:"endUserName"`
-	EndUserEmail     string          `json:"endUserEmail"`
-	Metadata         json.RawMessage `json:"metadata"`
-	Status           string          `json:"status"`
-	CredentialBlob   []byte          `json:"-"`
-	KeyVersion       int16           `json:"keyVersion"`
-	Revision         int64           `json:"revision"`
-	TokenExpiresAt   *time.Time      `json:"tokenExpiresAt,omitempty"`
-	LastVerifiedAt   *time.Time      `json:"lastVerifiedAt,omitempty"`
-	LastUsedAt       *time.Time      `json:"lastUsedAt,omitempty"`
-	LastErrorCode    string          `json:"lastErrorCode,omitempty"`
-	LastErrorMessage string          `json:"lastErrorMessage,omitempty"`
-	Tags             []string        `json:"tags"`
-	CreatedAt        time.Time       `json:"createdAt"`
-	UpdatedAt        time.Time       `json:"updatedAt"`
+	Enabled               bool            `json:"enabled"`
+	VerifiedTargetVersion int64           `json:"verifiedTargetVersion"`
+	VerifiedRevision      int64           `json:"verifiedRevision"`
+	ID                    string          `json:"id"`
+	WorkspaceID           string          `json:"-"`
+	ConnectionKey         string          `json:"connectionKey"`
+	Name                  string          `json:"name"`
+	IntegrationID         string          `json:"integrationId"`
+	IntegrationKey        string          `json:"integrationKey"`
+	SystemKey             string          `json:"systemKey"`
+	AuthInstanceID        string          `json:"authInstanceId"`
+	EndUserID             string          `json:"endUserId"`
+	EndUserKey            string          `json:"endUserKey"`
+	EndUserName           string          `json:"endUserName"`
+	EndUserEmail          string          `json:"endUserEmail"`
+	Metadata              json.RawMessage `json:"metadata"`
+	Status                string          `json:"status"`
+	CredentialBlob        []byte          `json:"-"`
+	KeyVersion            int16           `json:"keyVersion"`
+	Revision              int64           `json:"revision"`
+	TokenExpiresAt        *time.Time      `json:"tokenExpiresAt,omitempty"`
+	LastVerifiedAt        *time.Time      `json:"lastVerifiedAt,omitempty"`
+	LastUsedAt            *time.Time      `json:"lastUsedAt,omitempty"`
+	LastErrorCode         string          `json:"lastErrorCode,omitempty"`
+	LastErrorMessage      string          `json:"lastErrorMessage,omitempty"`
+	Tags                  []string        `json:"tags"`
+	CreatedAt             time.Time       `json:"createdAt"`
+	UpdatedAt             time.Time       `json:"updatedAt"`
 }
 
 type ActionDefinition struct {
-	ID             string          `json:"id"`
-	ActionKey      string          `json:"actionKey"`
-	Name           string          `json:"name"`
-	Description    string          `json:"description"`
-	Source         string          `json:"source"`
-	SystemID       string          `json:"systemId"`
-	SystemKey      string          `json:"systemKey"`
-	IntegrationID  string          `json:"integrationId,omitempty"`
-	HTTPMethod     string          `json:"httpMethod"`
-	RelativePath   string          `json:"relativePath"`
-	RequiredScopes []string        `json:"requiredScopes"`
-	InputSchema    json.RawMessage `json:"inputSchema"`
-	OutputSchema   json.RawMessage `json:"outputSchema"`
-	ExampleInput   json.RawMessage `json:"exampleInput"`
-	Executable     bool            `json:"executable"`
-	Status         string          `json:"status"`
-	Version        int64           `json:"version"`
-	CreatedAt      time.Time       `json:"createdAt"`
-	UpdatedAt      time.Time       `json:"updatedAt"`
+	RequestConfig   json.RawMessage `json:"requestConfig"`
+	ResponseConfig  json.RawMessage `json:"responseConfig"`
+	ExecutionConfig json.RawMessage `json:"executionConfig"`
+	ID              string          `json:"id"`
+	ActionKey       string          `json:"actionKey"`
+	Name            string          `json:"name"`
+	Description     string          `json:"description"`
+	Source          string          `json:"source"`
+	SystemID        string          `json:"systemId"`
+	SystemKey       string          `json:"systemKey"`
+	IntegrationID   string          `json:"integrationId,omitempty"`
+	HTTPMethod      string          `json:"httpMethod"`
+	RelativePath    string          `json:"relativePath"`
+	RequiredScopes  []string        `json:"requiredScopes"`
+	InputSchema     json.RawMessage `json:"inputSchema"`
+	OutputSchema    json.RawMessage `json:"outputSchema"`
+	ExampleInput    json.RawMessage `json:"exampleInput"`
+	Executable      bool            `json:"executable"`
+	Status          string          `json:"status"`
+	Version         int64           `json:"version"`
+	CreatedAt       time.Time       `json:"createdAt"`
+	UpdatedAt       time.Time       `json:"updatedAt"`
 }
 
 type RuntimeToken struct {
@@ -240,6 +252,27 @@ type SyncTask struct {
 	LastSuccessAt    *time.Time      `json:"lastSuccessAt,omitempty"`
 	LastErrorAt      *time.Time      `json:"lastErrorAt,omitempty"`
 	RecordsActive    int64           `json:"recordsActive"`
+	Version          int64           `json:"version"`
+	CreatedAt        time.Time       `json:"createdAt"`
+	UpdatedAt        time.Time       `json:"updatedAt"`
+}
+
+// Workflow is a multi-action orchestration definition. Graph and Input are
+// stored as raw JSON; encrypted run snapshots live on operation_runs.
+type Workflow struct {
+	ID               string          `json:"id"`
+	WorkspaceID      string          `json:"-"`
+	WorkflowKey      string          `json:"workflowKey"`
+	Name             string          `json:"name"`
+	Description      string          `json:"description"`
+	Status           string          `json:"status"`
+	Graph            json.RawMessage `json:"graph"`
+	ScheduleType     string          `json:"scheduleType"`
+	CronExpression   string          `json:"cronExpression,omitempty"`
+	ScheduleTimezone string          `json:"scheduleTimezone"`
+	NextRunAt        *time.Time      `json:"nextRunAt,omitempty"`
+	RetryPolicy      json.RawMessage `json:"retryPolicy"`
+	Input            json.RawMessage `json:"input"`
 	Version          int64           `json:"version"`
 	CreatedAt        time.Time       `json:"createdAt"`
 	UpdatedAt        time.Time       `json:"updatedAt"`
@@ -348,28 +381,36 @@ type SyncRecord struct {
 }
 
 type OperationRun struct {
-	ID             string           `json:"id"`
-	WorkspaceID    string           `json:"-"`
-	RequestID      string           `json:"requestId"`
-	Kind           string           `json:"kind"`
-	Name           string           `json:"name"`
-	Status         string           `json:"status"`
-	SystemID       string           `json:"systemId,omitempty"`
-	IntegrationID  string           `json:"integrationId,omitempty"`
-	ConnectionID   string           `json:"connectionId,omitempty"`
-	ActionID       string           `json:"actionId,omitempty"`
-	SyncTaskID     string           `json:"syncTaskId,omitempty"`
-	RuntimeTokenID string           `json:"runtimeTokenId,omitempty"`
-	Source         string           `json:"source"`
-	HTTPStatus     int              `json:"httpStatus,omitempty"`
-	Input          json.RawMessage  `json:"input,omitempty"`
-	Output         json.RawMessage  `json:"output,omitempty"`
-	ErrorCode      string           `json:"errorCode,omitempty"`
-	ErrorMessage   string           `json:"errorMessage,omitempty"`
-	StartedAt      time.Time        `json:"startedAt"`
-	CompletedAt    *time.Time       `json:"completedAt,omitempty"`
-	ExpiresAt      time.Time        `json:"expiresAt"`
-	Events         []OperationEvent `json:"events,omitempty"`
+	ID              string           `json:"id"`
+	WorkspaceID     string           `json:"-"`
+	RequestID       string           `json:"requestId"`
+	Kind            string           `json:"kind"`
+	Name            string           `json:"name"`
+	Status          string           `json:"status"`
+	SystemID        string           `json:"systemId,omitempty"`
+	IntegrationID   string           `json:"integrationId,omitempty"`
+	ConnectionID    string           `json:"connectionId,omitempty"`
+	ActionID        string           `json:"actionId,omitempty"`
+	SyncTaskID      string           `json:"syncTaskId,omitempty"`
+	WorkflowID      string           `json:"workflowId,omitempty"`
+	WorkflowVersion int64            `json:"workflowVersion,omitempty"`
+	ScheduledFor    *time.Time       `json:"scheduledFor,omitempty"`
+	RuntimeTokenID  string           `json:"runtimeTokenId,omitempty"`
+	Source          string           `json:"source"`
+	HTTPStatus      int              `json:"httpStatus,omitempty"`
+	Input           json.RawMessage  `json:"input,omitempty"`
+	Output          json.RawMessage  `json:"output,omitempty"`
+	ErrorCode       string           `json:"errorCode,omitempty"`
+	ErrorMessage    string           `json:"errorMessage,omitempty"`
+	StartedAt       time.Time        `json:"startedAt"`
+	CompletedAt     *time.Time       `json:"completedAt,omitempty"`
+	ExpiresAt       time.Time        `json:"expiresAt"`
+	Events          []OperationEvent `json:"events,omitempty"`
+	// WorkflowPayloadCipher and WorkflowResultCipher are never serialized to
+	// the API; the encrypted columns are only read by the dedicated decrypt
+	// paths for authorized callers.
+	WorkflowPayloadCipher []byte `json:"-"`
+	WorkflowResultCipher  []byte `json:"-"`
 }
 
 type OperationEvent struct {

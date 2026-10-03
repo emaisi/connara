@@ -17,7 +17,7 @@ func (s *Store) RotateSecrets(ctx context.Context, codec *secret.Codec) (int, er
 				revision = "revision"
 			}
 			query := fmt.Sprintf(`SELECT id::text,%s,%s FROM %s WHERE workspace_id=$1 AND key_version<>$2 AND %s IS NOT NULL AND length(%s)>0 ORDER BY id LIMIT 100`, spec.column, revision, spec.table, spec.column, spec.column)
-			rows, err := s.pool.Query(ctx, query, s.workspaceID, codec.Version())
+			rows, err := s.database(ctx).Query(ctx, query, s.workspaceID, codec.Version())
 			if err != nil {
 				return count, err
 			}
@@ -56,7 +56,7 @@ func (s *Store) RotateSecrets(ctx context.Context, codec *secret.Codec) (int, er
 				if err != nil {
 					return count, err
 				}
-				tag, err := s.pool.Exec(ctx, fmt.Sprintf(`UPDATE %s SET %s=$3,key_version=$4 WHERE workspace_id=$1 AND id=$2 AND %s=$5`, spec.table, spec.column, spec.column), s.workspaceID, i.id, blob, codec.Version(), i.blob)
+				tag, err := s.database(ctx).Exec(ctx, fmt.Sprintf(`UPDATE %s SET %s=$3,key_version=$4 WHERE workspace_id=$1 AND id=$2 AND %s=$5`, spec.table, spec.column, spec.column), s.workspaceID, i.id, blob, codec.Version(), i.blob)
 				if err != nil {
 					return count, err
 				}

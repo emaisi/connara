@@ -18,15 +18,18 @@ func TestLookupJSONPathAndTemplate(t *testing.T) {
 }
 
 func TestSupportedAuthenticationFlows(t *testing.T) {
-	for _, flow := range []string{"none", "static", "password_token", "client_credentials", "oauth2_code", "gateway"} {
+	for _, flow := range []string{"none", "static", "password_token", "client_credentials", "oauth2_code", "gateway", "mtls", "aws_sigv4", "jwt_direct", "jwt_bearer_grant", "token_exchange", "oidc"} {
 		if !SupportsFlow(flow) {
 			t.Fatalf("expected %q to be supported", flow)
 		}
 	}
-	for _, flow := range []string{"", "oauth1", "saml", "mtls", "jwt_signing"} {
+	for _, flow := range []string{"", "oauth1", "saml", "jwt_signing"} {
 		if SupportsFlow(flow) {
 			t.Fatalf("expected %q to require an extension", flow)
 		}
+	}
+	if SupportsTemplate("saml-token-exchange", "token_exchange") {
+		t.Fatal("legacy SAML template must not become executable")
 	}
 }
 

@@ -39,6 +39,7 @@ Connara 是一个可自行部署的 API 集成平台，用于连接外部服务�
 | 连接账号 | 保存最终用户、租户或服务账号的凭据，更新凭据、验证访问，并区分配置检查和真实上游验证。凭据使用 AES-256-GCM 加密。 |
 | API 操作 | 定义 HTTP 方法、相对路径、输入输出 Schema 和所需权限；校验输入，明确选择集成与连接，测试执行，查看结果并复制对应的 cURL。 |
 | 同步任务 | 配置手动或定时任务、记录提取路径、稳定主键、分页和检查点；支持部署、暂停、恢复、查看已保存记录及关联运行。 |
+| 工作流 | 把多个已注册 API 操作编排成步骤链或 DAG：`{{trigger.*}}` 与上游别名模板传值（保留 JSON 类型）、受限 runIf 条件跳过、`onError=continue` 容忍失败并标记警告、最终输出映射。支持手动、固定间隔与五字段 cron（IANA 时区）调度。运行时默认同步返回映射结果，`?async=1` 异步排队后用同一 Token 查询结果；触发即固定图、输入、绑定与 action 版本，编辑不影响已接受的运行。v1 串行执行且不自动重试。 |
 | Webhook | 管理入站事件源和出站通知端点；事件验签与签名、入站去重、失败重试，以及投递尝试详情。 |
 | 运行中心 | 查看接口调用、同步、认证及 Webhook 记录；按集成、连接、状态和时间筛选，通过 URL 直达详情，单独展示上游结果未知的情况。 |
 | 访问控制与审计 | 签发明确限定操作及连接范围的运行时 Token，撤销 Token，搜索审计记录，导出界面当前已加载的数据。 |
@@ -47,7 +48,7 @@ Connara 是一个可自行部署的 API 集成平台，用于连接外部服务�
 
 ### 认证方式支持情况
 
-当前有六种可以直接执行的认证方式：
+目前内置的可执行认证方式包括：
 
 - 无需认证。
 - API Key / Bearer Token，支持配置注入规则。
@@ -55,21 +56,22 @@ Connara 是一个可自行部署的 API 集成平台，用于连接外部服务�
 - 用户名密码换 Token。
 - OAuth 2.0 客户端凭证。
 - OAuth 2.0 授权码、PKCE 和 Token 刷新。
+- mTLS 客户端证书、AWS SigV4 逐请求签名。
+- JWT 直接签发、JWT Bearer grant、OAuth 2.0 Token Exchange。
+- 上游 OIDC 授权码与 ID Token 验证；OAuth 客户端认证可选 Basic、表单密钥、私钥 JWT 或客户端证书。
 
-目录还提供 OAuth 1.0a、HMAC/AWS SigV4、mTLS、OIDC、JWT 服务账号、SAML/Token Exchange、Kerberos/NTLM 网关等扩展模板。这些方式需要额外实现或网关支持；后台出现模板不代表已经实现对应协议。Webhook 的 HMAC 签名已经实现，与用于 API 认证的 HMAC 扩展模板是独立能力。
+OAuth 1.0a、服务商专用 HMAC、SAML 断言生成与验证、Kerberos/NTLM 协商仍需针对具体系统适配。旧的宽泛 HMAC、JWT、SAML 模板不会自动变成可执行协议；Kerberos/NTLM 网关模板仅注入已有网关令牌。新流程的配置、迁移与验收边界见[原生认证开发文档](docs/native-auth-development-plan.md)。Webhook HMAC 签名与 API 认证签名是独立能力。
 
 ## 后台导航
 
-侧栏分为六个主入口，关联页面按组折叠；打开子页面时自动展开对应分组。
+侧栏分为四个主入口，关联页面按组折叠；打开子页面时自动展开对应分组。
 
 | 主入口 | 包含页面 |
 | --- | --- |
 | 概览 | 集成统计、最近活动和接入快捷入口 |
-| 集成管理 | 集成配置、连接账号、系统目录、认证中心 |
-| API 操作 | 操作定义、执行测试和运行时调用示例 |
-| 自动化 | 同步任务、Webhook |
-| 运行中心 | 运行记录、详情和指标 |
-| 平台管理 | 访问控制、审计日志、团队管理、平台设置 |
+| 集成管理 | 系统目录、认证中心、集成配置、连接账号 |
+| 调用与运行 | API 操作、运行中心 |
+| 更多功能 | 同步任务、工作流、Webhook、访问控制、审计日志、团队管理、平台设置 |
 
 **快速开始**和**开发者文档**固定放在侧栏底部。菜单随前端程序提供，不需要另外导入菜单 SQL。
 
@@ -236,6 +238,20 @@ unset APIHUB_RUNTIME_TOKEN
 
 把两个占位标识替换为当前后台中的集成 ID 和连接标识。运行时 Token 与管理员登录会话是两套凭据。运行时请求可以携带 `Idempotency-Key`；同一个键只用于同一请求的重试。
 
+已部署的工作流同样通过运行时平面调用。发现接口只返回当前 Token 有权调用的组合，同步触发直接返回部署时配置的输出映射：
+
+```bash
+curl --fail-with-body 'http://127.0.0.1:8080/v1/workflows' \
+  --header "Authorization: Bearer ${APIHUB_RUNTIME_TOKEN}"
+curl --fail-with-body --request POST \
+  'http://127.0.0.1:8080/v1/workflows/order-flow' \
+  --header "Authorization: Bearer ${APIHUB_RUNTIME_TOKEN}" \
+  --header 'Content-Type: application/json' \
+  --data '{"input":{"customerId":"C-1"}}'
+# 长组合改用异步：POST .../order-flow?async=1 返回 202 与 operationId，
+# 随后 GET /v1/workflow-runs/{operationId} 轮询状态与最终输出。
+```
+
 ## 配置说明
 
 公开项目名称为 **Connara**。首个开源版本保留 `apihub` 二进制名称、`APIHUB_*` 环境变量、Go 模块名和已有数据库结构，兼容此前的本地部署。
@@ -254,7 +270,7 @@ unset APIHUB_RUNTIME_TOKEN
 | `APIHUB_ADMIN_EMAIL`、`APIHUB_ADMIN_PASSWORD_HASH` | 首次管理员邮箱及 bcrypt 密码哈希；初始化后修改它们不会重置已有账号。 |
 | `APIHUB_WORKSPACE_ID`、`APIHUB_WORKSPACE_SLUG`、`APIHUB_WORKSPACE_NAME` | 工作区标识和首次初始化名称。 |
 | `APIHUB_ROLE` | `all`（默认）、`api`、`worker` 或 `scheduler`。 |
-| `APIHUB_ALLOWED_PRIVATE_CIDRS` | 允许上游 HTTP 请求访问的私网范围，多个 CIDR 用逗号分隔。 |
+| `APIHUB_ALLOWED_PRIVATE_CIDRS` | 额外允许上游 HTTP 请求访问的私网范围，多个 CIDR 用逗号分隔。认证实例中的 Token、刷新地址及 OIDC issuer 自动授权，无需配置此变量。 |
 | `APIHUB_CATALOG_DIR` | 可选 JSON 系统目录，首次初始化前设置，可导入更多目录条目。 |
 | `APIHUB_ENV_FILE` | Shell 脚本使用的其他配置文件路径。 |
 
@@ -320,7 +336,7 @@ sudo journalctl -u apihub -n 100 --no-pager
 | 提示 `schema version ... unsupported` | 启动前，使用有迁移权限的账号运行新版本 `scripts/init.sh`。 |
 | 就绪检查返回 `component: redis` | 检查 Redis 地址、密码和连通性；此时页面可能仍能打开，但 OAuth state、锁和需要限流的请求不可正常使用。 |
 | 5173 页面请求 API 失败 | Vite 只提供开发服务，还需要启动监听 8080 的 Go 后端。 |
-| 企业内网接口被拒绝 | 在 `APIHUB_ALLOWED_PRIVATE_CIDRS` 中添加实际需要的网段或单机 CIDR，例如 `10.20.0.0/16`。 |
+| 企业内网接口被拒绝 | 认证实例中的 Token、刷新地址及 OIDC issuer 无需额外配置；其他内网上游请求可在 `APIHUB_ALLOWED_PRIVATE_CIDRS` 中添加所需网段或单机 CIDR，例如 `10.20.0.0/16`。 |
 | 连接显示已配置、尚未验证 | 设置上游验证路径或实际执行 Action；配置保存成功不能代替上游调用成功。 |
 | 页面仍显示旧版本 | 前端和 Go 二进制都需要重新构建，然后重启；前端资产保存在二进制中。 |
 | 运行结果未知 | 上游可能已执行；重试有副作用的请求前先在上游核对。 |

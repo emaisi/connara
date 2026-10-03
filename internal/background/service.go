@@ -1,8 +1,6 @@
 package background
 
 import (
-	"apihub-go/internal/jsonutil"
-	"apihub-go/internal/webhooksig"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -13,21 +11,27 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"apihub-go/internal/authn"
+	"apihub-go/internal/buildinfo"
 	"apihub-go/internal/catalog"
 	"apihub-go/internal/executor"
+	"apihub-go/internal/jsonutil"
 	"apihub-go/internal/model"
 	"apihub-go/internal/secret"
 	"apihub-go/internal/store"
+	"apihub-go/internal/webhooksig"
+	"apihub-go/internal/workflow"
 )
 
 type Service struct {
 	store    *store.Store
 	auth     *authn.Service
 	executor *executor.Executor
+	catalog  *catalog.Catalog
 	codec    *secret.Codec
 	client   *http.Client
 	logger   *slog.Logger
@@ -35,16 +39,37 @@ type Service struct {
 	stopping atomic.Bool
 }
 
-func New(database *store.Store, auth *authn.Service, actionExecutor *executor.Executor, codec *secret.Codec, client *http.Client, logger *slog.Logger, workerID string) *Service {
-	return &Service{store: database, auth: auth, executor: actionExecutor, codec: codec, client: client, logger: logger, workerID: fmt.Sprintf("%s:%x", workerID, randomWorkerID())}
+func New(database *store.Store, auth *authn.Service, actionExecutor *executor.Executor, providerCatalog *catalog.Catalog, codec *secret.Codec, client *http.Client, logger *slog.Logger, workerID string) *Service {
+	return &Service{store: database, auth: auth, executor: actionExecutor, catalog: providerCatalog, codec: codec, client: client, logger: logger, workerID: fmt.Sprintf("%s:%x", workerID, randomWorkerID())}
 }
 
-func (s *Service) RunWorker(ctx context.Context) {
+func (s *Service) RunWorkers(ctx context.Context, syncWorkers, workflowWorkers, webhookWorkers int) {
+	var workers sync.WaitGroup
+	start := func(kind string, count int) {
+		for slot := 0; slot < count; slot++ {
+			workers.Add(1)
+			go func(slot int) {
+				defer workers.Done()
+				s.runWorker(ctx, fmt.Sprintf("%s:%s:%d", s.workerID, kind, slot), []string{kind})
+			}(slot)
+		}
+	}
+	start("sync_run", syncWorkers)
+	start("workflow_run", workflowWorkers)
+	start("webhook_delivery", webhookWorkers)
+	workers.Wait()
+}
+
+func (s *Service) runWorker(ctx context.Context, workerID string, kinds []string) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for !s.stopping.Load() {
-		if err := s.work(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		worked, err := s.work(ctx, workerID, kinds)
+		if err != nil && !errors.Is(err, context.Canceled) {
 			s.logger.ErrorContext(ctx, "background worker", "error", err)
+		}
+		if worked && err == nil {
+			continue
 		}
 		select {
 		case <-ctx.Done():
@@ -71,6 +96,11 @@ func (s *Service) RunScheduler(ctx context.Context) {
 		if _, err := s.store.EnqueueDueSyncTasks(ctx, 20); err != nil && !errors.Is(err, context.Canceled) {
 			s.logger.ErrorContext(ctx, "enqueue scheduled sync", "error", err)
 		}
+		if enqueued, skipped, err := s.store.EnqueueDueWorkflows(ctx, 20, s.codec); err != nil && !errors.Is(err, context.Canceled) {
+			s.logger.ErrorContext(ctx, "enqueue scheduled workflows", "error", err)
+		} else if len(skipped) > 0 {
+			s.logger.WarnContext(ctx, "skipped scheduled workflow triggers", "workflows", skipped, "enqueued", enqueued)
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -79,17 +109,18 @@ func (s *Service) RunScheduler(ctx context.Context) {
 	}
 }
 
-func (s *Service) work(ctx context.Context) error {
-	if _, err := s.store.ExpandOutbox(ctx, 50); err != nil {
-		return err
+func (s *Service) work(ctx context.Context, workerID string, kinds []string) (bool, error) {
+	expanded, err := s.store.ExpandOutbox(ctx, 50)
+	if err != nil {
+		return false, err
 	}
 
 	if s.stopping.Load() {
-		return nil
+		return expanded > 0, nil
 	}
-	jobs, err := s.store.ClaimJobs(ctx, s.workerID, 1)
+	jobs, err := s.store.ClaimJobsByKinds(ctx, workerID, 1, kinds)
 	if err != nil {
-		return err
+		return expanded > 0, err
 	}
 	for _, job := range jobs {
 		jobCtx, cancel := context.WithCancel(ctx)
@@ -115,9 +146,18 @@ func (s *Service) work(ctx context.Context) error {
 			}
 		}()
 		var runErr error
+		finalize := true
 		switch job.Kind {
 		case "sync_run":
 			runErr = s.runSync(jobCtx, job)
+		case "workflow_run":
+			runErr = s.RunWorkflowJob(jobCtx, job)
+			// Workflow outcomes (including step failures) were already
+			// committed together with the job state in one fenced
+			// transaction; the generic finalizer must not touch them again.
+			if runErr == nil {
+				finalize = false
+			}
 		case "webhook_delivery":
 			runErr = s.deliverWebhook(jobCtx, job)
 		default:
@@ -128,18 +168,24 @@ func (s *Service) work(ctx context.Context) error {
 		finishCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
 		var finishErr error
 		if runErr == nil {
-			finishErr = s.store.CompleteJob(finishCtx, job, s.workerID)
+			if finalize {
+				finishErr = s.store.CompleteJob(finishCtx, job, workerID)
+			}
 		} else {
-			finishErr = s.store.FailJob(finishCtx, job, s.workerID, runErr.Error())
+			if executor.OutcomeUnknown(runErr) {
+				finishErr = s.store.FailJobUnknown(finishCtx, job, workerID, runErr.Error())
+			} else {
+				finishErr = s.store.FailJob(finishCtx, job, workerID, runErr.Error())
+			}
 			s.logger.Warn("background job failed", "job_id", job.ID, "attempt", job.Attempt, "error", runErr)
 		}
 		stop()
 		if finishErr != nil {
-			return fmt.Errorf("finalize job %s: %w", job.ID, finishErr)
+			return true, fmt.Errorf("finalize job %s: %w", job.ID, finishErr)
 		}
 	}
 
-	return nil
+	return expanded > 0 || len(jobs) > 0, nil
 }
 
 func (s *Service) runSync(ctx context.Context, job model.Job) error {
@@ -158,10 +204,6 @@ func (s *Service) runSync(ctx context.Context, job model.Job) error {
 		return err
 	}
 	integration, err := s.store.Integration(ctx, task.IntegrationID)
-	if err != nil {
-		return err
-	}
-	resolved, err := s.auth.Resolve(ctx, task.ConnectionID)
 	if err != nil {
 		return err
 	}
@@ -214,15 +256,21 @@ func (s *Service) runSync(ctx context.Context, job model.Job) error {
 		if config.PageSizeParam != "" && config.PageSize > 0 {
 			input[config.PageSizeParam] = json.Number(strconv.Itoa(config.PageSize))
 		}
-		if err := validator.ValidateInput(actionModel(action), input); err != nil {
+		if err := validator.ValidateInput(workflow.ActionModel(action), input); err != nil {
 			return err
 		}
-		result, err := s.executor.Action(ctx, provider, actionModel(action), input, nil, executor.RequestAuth{Headers: resolved.Headers, Query: resolved.Query, Cookies: resolved.Cookies})
+		resolved, err := s.auth.Resolve(ctx, task.ConnectionID)
 		if err != nil {
 			return err
 		}
-		if result.Status < 200 || result.Status >= 300 {
-			return fmt.Errorf("sync provider returned HTTP %d", result.Status)
+		callCtx, cancelCall := context.WithTimeout(ctx, executor.Budget(action.ExecutionConfig))
+		result, err := s.executor.Action(callCtx, provider, workflow.ActionModel(action), input, nil, resolved.RequestAuth())
+		cancelCall()
+		if err != nil {
+			return err
+		}
+		if err := executor.CheckResponse(workflow.ActionModel(action).Runtime, result.Status, result.Body, workflow.ActionModel(action).OutputSchema); err != nil {
+			return err
 		}
 		records, next, err := extractSyncPage(task.ID, result.Body, config)
 		if err != nil {
@@ -265,7 +313,7 @@ func (s *Service) deliverWebhook(ctx context.Context, job model.Job) error {
 		return err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", "apihub-go/0.2")
+	request.Header.Set("User-Agent", buildinfo.UserAgent)
 	request.Header.Set("X-APIHub-Event", work.EventType)
 	request.Header.Set("X-APIHub-Event-ID", work.EventID)
 	if len(work.SecretBlob) > 0 {
@@ -306,13 +354,6 @@ func (s *Service) deliverWebhook(ctx context.Context, job model.Job) error {
 	}
 	attempt.HTTPStatus = response.StatusCode
 	return s.store.FinishWebhookDeliveryAttempt(ctx, job, attempt, true, false)
-}
-
-func actionModel(item model.ActionDefinition) model.Action {
-	input, output := map[string]any{}, map[string]any{}
-	_ = jsonutil.Unmarshal(item.InputSchema, &input)
-	_ = jsonutil.Unmarshal(item.OutputSchema, &output)
-	return model.Action{ID: item.ActionKey, Service: item.SystemKey, Name: item.Name, Description: item.Description, RequiredScopes: item.RequiredScopes, InputSchema: input, OutputSchema: output, Runtime: &model.HTTPActionRuntime{Method: item.HTTPMethod, Path: item.RelativePath}, Executable: item.Executable}
 }
 
 func randomWorkerID() []byte {

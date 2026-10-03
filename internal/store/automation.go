@@ -14,7 +14,7 @@ import (
 )
 
 func (s *Store) ListSyncTasks(ctx context.Context) ([]model.SyncTask, error) {
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.database(ctx).Query(ctx, `
 		SELECT st.id::text, st.task_key, st.name, st.integration_id::text, i.integration_key,
 		       st.connection_id::text, st.action_id::text, a.action_key, st.status,
 		       st.schedule_type, COALESCE(st.cron_expression, ''), st.schedule_timezone,
@@ -43,7 +43,7 @@ func (s *Store) ListSyncTasks(ctx context.Context) ([]model.SyncTask, error) {
 }
 
 func (s *Store) SyncTask(ctx context.Context, idOrKey string) (model.SyncTask, error) {
-	item, err := scanSyncTask(s.pool.QueryRow(ctx, `
+	item, err := scanSyncTask(s.database(ctx).QueryRow(ctx, `
 		SELECT st.id::text, st.task_key, st.name, st.integration_id::text, i.integration_key,
 		       st.connection_id::text, st.action_id::text, a.action_key, st.status,
 		       st.schedule_type, COALESCE(st.cron_expression, ''), st.schedule_timezone,
@@ -82,7 +82,7 @@ func (s *Store) SaveSyncTask(ctx context.Context, item model.SyncTask) (model.Sy
 	if item.ScheduleTimezone == "" {
 		item.ScheduleTimezone = "UTC"
 	}
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	err := s.withTx(ctx, func(tx pgx.Tx) error {
 		if err := s.validateSyncTaskDependencies(ctx, tx, item); err != nil {
 			return err
 		}
@@ -134,16 +134,17 @@ func (s *Store) validateSyncTaskDependencies(ctx context.Context, querier syncDe
 		return fmt.Errorf("%w: sync integration is not ready", ErrConflict)
 	}
 	var connectionIntegrationID, connectionStatus string
+	var targetValid bool
 	if err := querier.QueryRow(ctx, `
-		SELECT integration_id::text, status FROM connections
-		WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`,
-		s.workspaceID, item.ConnectionID).Scan(&connectionIntegrationID, &connectionStatus); err != nil {
+		SELECT c.integration_id::text,c.status,(c.enabled AND c.last_verified_at IS NOT NULL AND c.verified_revision=c.revision AND c.verified_target_version=i.target_version) FROM connections c JOIN integrations i ON i.id=c.integration_id AND i.workspace_id=c.workspace_id
+ WHERE c.workspace_id=$1 AND c.id=$2 AND c.deleted_at IS NULL`,
+		s.workspaceID, item.ConnectionID).Scan(&connectionIntegrationID, &connectionStatus, &targetValid); err != nil {
 		return mapNotFound(err)
 	}
 	if connectionIntegrationID != item.IntegrationID {
 		return fmt.Errorf("%w: sync connection belongs to another integration", ErrConflict)
 	}
-	if connectionStatus != "active" {
+	if connectionStatus != "active" || !targetValid {
 		return fmt.Errorf("%w: sync connection is not active", ErrConflict)
 	}
 	var actionSystemID, actionStatus string
@@ -168,7 +169,7 @@ func (s *Store) ValidateSyncTaskReady(ctx context.Context, item model.SyncTask) 
 }
 
 func (s *Store) SetSyncTaskStatus(ctx context.Context, id, status string, nextRunAt *time.Time) (model.SyncTask, error) {
-	command, err := s.pool.Exec(ctx, `
+	command, err := s.database(ctx).Exec(ctx, `
 		UPDATE sync_tasks SET status = $3, next_run_at = $4,
 		       version = version + 1, updated_at = now()
 		WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`,
@@ -183,7 +184,7 @@ func (s *Store) SetSyncTaskStatus(ctx context.Context, id, status string, nextRu
 }
 
 func (s *Store) DeleteSyncTask(ctx context.Context, id string) error {
-	command, err := s.pool.Exec(ctx, `
+	command, err := s.database(ctx).Exec(ctx, `
 		UPDATE sync_tasks SET status = 'disabled', deleted_at = now(), updated_at = now()
 		WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`, s.workspaceID, id)
 	if err != nil {
@@ -197,7 +198,7 @@ func (s *Store) DeleteSyncTask(ctx context.Context, id string) error {
 
 func (s *Store) EnqueueSync(ctx context.Context, task model.SyncTask, source, requestID string) (model.OperationRun, error) {
 	var operation model.OperationRun
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	err := s.withTx(ctx, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT id FROM sync_tasks WHERE workspace_id=$1 AND id=$2 FOR UPDATE`, s.workspaceID, task.ID); err != nil {
 			return err
 		}
@@ -256,13 +257,25 @@ func (s *Store) enqueueSync(ctx context.Context, tx pgx.Tx, task model.SyncTask,
 }
 
 func (s *Store) RecordSyncFailure(ctx context.Context, taskID string) {
-	_, _ = s.pool.Exec(ctx, `
+	_, _ = s.database(ctx).Exec(ctx, `
 		UPDATE sync_task_states SET last_error_at = now(), updated_at = now()
 		WHERE workspace_id = $1 AND sync_task_id = $2`, s.workspaceID, taskID)
 }
 
 func (s *Store) ClaimJobs(ctx context.Context, worker string, limit int) ([]model.Job, error) {
-	limit = 1 // This worker executes serially; never lease more work than capacity.
+	return s.ClaimJobsByKinds(ctx, worker, limit, nil)
+}
+
+func (s *Store) ClaimJobsByKinds(ctx context.Context, worker string, limit int, kinds []string) ([]model.Job, error) {
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	if kinds == nil {
+		kinds = []string{}
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -274,7 +287,7 @@ func (s *Store) ClaimJobs(ctx context.Context, worker string, limit int) ([]mode
 	rows, err := tx.Query(ctx, `
 		WITH claimed AS (
 			SELECT id FROM jobs
-			WHERE workspace_id = $1 AND attempt < max_attempts
+			WHERE workspace_id = $1 AND attempt < max_attempts AND (cardinality($4::text[]) = 0 OR kind = ANY($4::text[]))
  AND NOT EXISTS(SELECT 1 FROM jobs other WHERE other.workspace_id=$1 AND other.kind=jobs.kind AND other.resource_id=jobs.resource_id AND other.id<>jobs.id AND other.status='running' AND (other.lease_expires_at>now() OR other.id<jobs.id)) AND (
 				(status = 'queued' AND run_after <= now()) OR
 				(status = 'running' AND lease_expires_at < now())
@@ -289,7 +302,7 @@ func (s *Store) ClaimJobs(ctx context.Context, worker string, limit int) ([]mode
 		          COALESCE(j.resource_id::text, ''), COALESCE(j.operation_id::text, ''),
 		          j.payload, j.status, j.priority, j.attempt, j.max_attempts,
 		          j.run_after, COALESCE(j.lease_owner, ''), j.lease_expires_at,
-		          COALESCE(j.last_error, ''), j.created_at, j.updated_at`, s.workspaceID, limit, worker)
+		          COALESCE(j.last_error, ''), j.created_at, j.updated_at`, s.workspaceID, limit, worker, kinds)
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +328,7 @@ func (s *Store) ClaimJobs(ctx context.Context, worker string, limit int) ([]mode
 }
 
 func (s *Store) CompleteJob(ctx context.Context, job model.Job, worker string) error {
-	command, err := s.pool.Exec(ctx, `
+	command, err := s.database(ctx).Exec(ctx, `
 		UPDATE jobs SET status = 'succeeded', completed_at = now(), lease_owner = NULL,
 		       lease_expires_at = NULL, updated_at = now()
 		WHERE id = $1 AND lease_owner = $2 AND status = 'running' AND attempt=$3 AND lease_expires_at>now() AND workspace_id=$4`, job.ID, worker, job.Attempt, s.workspaceID)
@@ -329,7 +342,14 @@ func (s *Store) CompleteJob(ctx context.Context, job model.Job, worker string) e
 }
 
 func (s *Store) FailJob(ctx context.Context, job model.Job, worker, message string) error {
-	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	return s.failJob(ctx, job, worker, message, false)
+}
+func (s *Store) FailJobUnknown(ctx context.Context, job model.Job, worker, message string) error {
+	job.MaxAttempts = job.Attempt
+	return s.failJob(ctx, job, worker, message, true)
+}
+func (s *Store) failJob(ctx context.Context, job model.Job, worker, message string, unknown bool) error {
+	return s.withTx(ctx, func(tx pgx.Tx) error {
 		if err := s.fenceJob(ctx, tx, job); err != nil {
 			return err
 		}
@@ -342,7 +362,7 @@ func (s *Store) FailJob(ctx context.Context, job model.Job, worker, message stri
 		if job.Attempt >= job.MaxAttempts {
 			state = "dead"
 		}
-		if _, err := tx.Exec(ctx, `UPDATE jobs SET status=$3,run_after=now()+$4*interval '1 second',last_error=$5,lease_owner=NULL,lease_expires_at=NULL,updated_at=now(),completed_at=CASE WHEN $3='dead' THEN now() END WHERE workspace_id=$1 AND id=$2`, s.workspaceID, job.ID, state, 1<<min(job.Attempt, 10), message); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE jobs SET status=$3::varchar,run_after=now()+$4*interval '1 second',last_error=$5,lease_owner=NULL,lease_expires_at=NULL,updated_at=now(),completed_at=CASE WHEN $3::varchar='dead' THEN now() END WHERE workspace_id=$1 AND id=$2`, s.workspaceID, job.ID, state, 1<<min(job.Attempt, 10), message); err != nil {
 			return err
 		}
 		if job.OperationID != "" {
@@ -350,7 +370,10 @@ func (s *Store) FailJob(ctx context.Context, job model.Job, worker, message stri
 			if state == "dead" {
 				status = "failed"
 			}
-			_, err := tx.Exec(ctx, `UPDATE operation_runs SET status=$3,error_message=$4,completed_at=CASE WHEN $3='failed' THEN now() END WHERE workspace_id=$1 AND id=$2 AND status<>'success'`, s.workspaceID, job.OperationID, status, message)
+			if unknown {
+				status = "unknown"
+			}
+			_, err := tx.Exec(ctx, `UPDATE operation_runs SET status=CASE WHEN kind='workflow' AND status='running' THEN 'unknown' ELSE $3::varchar END,error_message=$4,completed_at=CASE WHEN $3::varchar IN ('failed','unknown') THEN now() END WHERE workspace_id=$1 AND id=$2 AND status<>'success'`, s.workspaceID, job.OperationID, status, message)
 			return err
 		}
 		return nil
@@ -366,7 +389,7 @@ func (s *Store) fenceJob(ctx context.Context, tx pgx.Tx, job model.Job) error {
 	return err
 }
 func (s *Store) RenewJob(ctx context.Context, job model.Job) error {
-	tag, err := s.pool.Exec(ctx, `UPDATE jobs SET lease_expires_at=now()+interval '60 seconds',updated_at=now() WHERE workspace_id=$1 AND id=$2 AND lease_owner=$3 AND attempt=$4 AND status='running' AND lease_expires_at>now()`, s.workspaceID, job.ID, job.LeaseOwner, job.Attempt)
+	tag, err := s.database(ctx).Exec(ctx, `UPDATE jobs SET lease_expires_at=now()+interval '60 seconds',updated_at=now() WHERE workspace_id=$1 AND id=$2 AND lease_owner=$3 AND attempt=$4 AND status='running' AND lease_expires_at>now()`, s.workspaceID, job.ID, job.LeaseOwner, job.Attempt)
 	if err == nil && tag.RowsAffected() != 1 {
 		return ErrConflict
 	}
@@ -374,7 +397,7 @@ func (s *Store) RenewJob(ctx context.Context, job model.Job) error {
 }
 
 func (s *Store) CommitSyncPage(ctx context.Context, job model.Job, task model.SyncTask, checkpoint []byte, records []model.SyncRecord, done bool, total int) error {
-	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	return s.withTx(ctx, func(tx pgx.Tx) error {
 		if err := s.fenceJob(ctx, tx, job); err != nil {
 			return err
 		}
@@ -425,7 +448,7 @@ func (s *Store) ListSyncRecords(ctx context.Context, taskID string, limit int, o
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.database(ctx).Query(ctx, `
 		SELECT id::text, sync_task_id::text, model, external_id, payload, payload_hash,
 		       source_created_at, source_updated_at, first_seen_at, last_seen_at, deleted_at
 		FROM sync_records WHERE workspace_id = $1 AND sync_task_id = $2
@@ -450,7 +473,7 @@ func (s *Store) ListSyncRecords(ctx context.Context, taskID string, limit int, o
 }
 
 func (s *Store) ListWebhookEndpoints(ctx context.Context) ([]model.WebhookEndpoint, error) {
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.database(ctx).Query(ctx, `
 		SELECT we.id::text, we.name, we.primary_url, COALESCE(we.fallback_url, ''),
 		       we.secret_blob, we.key_version, we.status, we.failure_count, we.paused_at,
 		       COALESCE((SELECT array_agg(wee.event_pattern ORDER BY wee.event_pattern)
@@ -484,7 +507,7 @@ func (s *Store) SaveWebhookEndpoint(ctx context.Context, item model.WebhookEndpo
 	if item.Status == "" {
 		item.Status = "active"
 	}
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	err := s.withTx(ctx, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO webhook_endpoints(
 				id, workspace_id, name, primary_url, fallback_url, secret_blob,
@@ -529,7 +552,7 @@ func (s *Store) SaveWebhookEndpoint(ctx context.Context, item model.WebhookEndpo
 }
 
 func (s *Store) ListWebhookSources(ctx context.Context) ([]model.WebhookSource, error) {
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.database(ctx).Query(ctx, `
 		SELECT ws.id::text, ws.source_key, ws.name, ws.integration_id::text, i.integration_key,
 		       ws.status, ws.signature_type, ws.secret_blob, ws.key_version,
 		       ws.subscribed_events, ws.settings, ws.version, ws.created_at, ws.updated_at
@@ -557,7 +580,7 @@ func (s *Store) ListWebhookSources(ctx context.Context) ([]model.WebhookSource, 
 
 func (s *Store) WebhookSourceByKey(ctx context.Context, sourceKey string) (model.WebhookSource, error) {
 	var item model.WebhookSource
-	err := s.pool.QueryRow(ctx, `
+	err := s.database(ctx).QueryRow(ctx, `
 		SELECT ws.id::text, ws.source_key, ws.name, ws.integration_id::text, i.integration_key,
 		       ws.status, ws.signature_type, ws.secret_blob, ws.key_version,
 		       ws.subscribed_events, ws.settings, ws.version, ws.created_at, ws.updated_at
@@ -580,7 +603,7 @@ func (s *Store) RecordInboundWebhook(ctx context.Context, source model.WebhookSo
 		return false, "", err
 	}
 	created := false
-	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	err = s.withTx(ctx, func(tx pgx.Tx) error {
 		command, err := tx.Exec(ctx, `
 			INSERT INTO webhook_ingress_events(
 				id, workspace_id, webhook_source_id, provider_event_id, event_type,
@@ -626,7 +649,7 @@ func (s *Store) SaveWebhookSource(ctx context.Context, item model.WebhookSource)
 		item.Status = "active"
 	}
 	var integrationStatus string
-	if err := s.pool.QueryRow(ctx, `
+	if err := s.database(ctx).QueryRow(ctx, `
 		SELECT status FROM integrations
 		WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`,
 		s.workspaceID, item.IntegrationID).Scan(&integrationStatus); err != nil {
@@ -635,7 +658,7 @@ func (s *Store) SaveWebhookSource(ctx context.Context, item model.WebhookSource)
 	if item.Status == "active" && integrationStatus != "ready" {
 		return model.WebhookSource{}, fmt.Errorf("%w: active webhook sources require a ready integration", ErrConflict)
 	}
-	_, err := s.pool.Exec(ctx, `
+	_, err := s.database(ctx).Exec(ctx, `
 		INSERT INTO webhook_sources(
 			id, workspace_id, source_key, name, integration_id, status,
 			signature_type, secret_blob, key_version, subscribed_events, settings
@@ -667,7 +690,7 @@ func (s *Store) SaveWebhookSource(ctx context.Context, item model.WebhookSource)
 }
 
 func (s *Store) CreateOutboxEvent(ctx context.Context, event model.OutboxEvent) error {
-	_, err := s.pool.Exec(ctx, `
+	_, err := s.database(ctx).Exec(ctx, `
 		INSERT INTO outbox_events(
 			id, workspace_id, event_type, aggregate_type, aggregate_id,
 			dedupe_key, payload, status
@@ -683,7 +706,7 @@ func (s *Store) CreateOutboxEvent(ctx context.Context, event model.OutboxEvent) 
 // notify unrelated endpoints and does not depend on a webhook.test pattern.
 func (s *Store) QueueWebhookTest(ctx context.Context, endpointID string, event model.OutboxEvent) (string, error) {
 	deliveryID := StableID("webhook-delivery", event.ID+":"+endpointID)
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	err := s.withTx(ctx, func(tx pgx.Tx) error {
 		var targetURL, status string
 		if err := tx.QueryRow(ctx, `
 			SELECT primary_url, status FROM webhook_endpoints
@@ -726,7 +749,7 @@ func (s *Store) ListWebhookDeliveries(ctx context.Context, limit int, options ..
 		limit = 100
 	}
 	o := listOptions(options)
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.database(ctx).Query(ctx, `
 		SELECT wd.id::text, oe.event_type, we.name, wd.target_url, wd.status,
 		       wd.attempt_count, wd.next_attempt_at, COALESCE(wd.last_http_status, 0),
 		       COALESCE(wd.last_error, ''), wd.created_at, wd.delivered_at
@@ -756,7 +779,7 @@ func (s *Store) ListWebhookDeliveries(ctx context.Context, limit int, options ..
 
 func (s *Store) ListWebhookDeliveryAttempts(ctx context.Context, deliveryID string) ([]model.WebhookDeliveryAttempt, error) {
 	var exists bool
-	if err := s.pool.QueryRow(ctx, `
+	if err := s.database(ctx).QueryRow(ctx, `
 		SELECT EXISTS(SELECT 1 FROM webhook_deliveries WHERE workspace_id = $1 AND id = $2)`,
 		s.workspaceID, deliveryID).Scan(&exists); err != nil {
 		return nil, err
@@ -764,7 +787,7 @@ func (s *Store) ListWebhookDeliveryAttempts(ctx context.Context, deliveryID stri
 	if !exists {
 		return nil, ErrNotFound
 	}
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.database(ctx).Query(ctx, `
 		SELECT id::text, webhook_delivery_id::text, attempt_no, target_url, request_id,
 		       COALESCE(http_status, 0), COALESCE(duration_ms, 0),
 		       COALESCE(error_message, ''), created_at
@@ -790,18 +813,18 @@ func (s *Store) ListWebhookDeliveryAttempts(ctx context.Context, deliveryID stri
 
 func (s *Store) WebhookEndpointSecretBlob(ctx context.Context, id string) ([]byte, error) {
 	var blob []byte
-	err := s.pool.QueryRow(ctx, `SELECT secret_blob FROM webhook_endpoints WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL`, s.workspaceID, id).Scan(&blob)
+	err := s.database(ctx).QueryRow(ctx, `SELECT secret_blob FROM webhook_endpoints WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL`, s.workspaceID, id).Scan(&blob)
 	return blob, mapNotFound(err)
 }
 
 func (s *Store) WebhookSourceSecretBlob(ctx context.Context, id string) ([]byte, error) {
 	var blob []byte
-	err := s.pool.QueryRow(ctx, `SELECT secret_blob FROM webhook_sources WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL`, s.workspaceID, id).Scan(&blob)
+	err := s.database(ctx).QueryRow(ctx, `SELECT secret_blob FROM webhook_sources WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL`, s.workspaceID, id).Scan(&blob)
 	return blob, mapNotFound(err)
 }
 
 func (s *Store) RetryWebhookDelivery(ctx context.Context, id string) error {
-	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	return s.withTx(ctx, func(tx pgx.Tx) error {
 		var running bool
 		if err := tx.QueryRow(ctx, `SELECT status='running' FROM jobs WHERE workspace_id=$1 AND id=$2 FOR UPDATE`, s.workspaceID, StableID("webhook-job", id)).Scan(&running); err != nil {
 			return mapNotFound(err)

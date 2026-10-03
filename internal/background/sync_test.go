@@ -2,6 +2,7 @@ package background
 
 import (
 	"apihub-go/internal/authn"
+	"apihub-go/internal/catalog"
 	"apihub-go/internal/executor"
 	"apihub-go/internal/secret"
 	"apihub-go/internal/testutil"
@@ -11,7 +12,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestSyncRecordIdentityAndResponsePaths(t *testing.T) {
@@ -62,7 +65,7 @@ func TestSyncResumeSkipsPersistedPage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := New(db, auth, executor.New(server.Client()), codec, server.Client(), slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
+	service := New(db, auth, executor.New(server.Client()), &catalog.Catalog{}, codec, server.Client(), slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
 	if err := service.runSync(ctx, jobs[0]); err == nil {
 		t.Fatal("expected second-page failure")
 	}
@@ -86,5 +89,46 @@ func TestSyncResumeSkipsPersistedPage(t *testing.T) {
 	records, _ = db.ListSyncRecords(ctx, f.Task.ID, 100)
 	if len(records) != 2 {
 		t.Fatal("second page missing")
+	}
+}
+
+func TestSyncAPITimeoutDoesNotReplayUnknownRequest(t *testing.T) {
+	db := testutil.Database(t)
+	f := testutil.Seed(t, db)
+	ctx := context.Background()
+	codec, _ := secret.New(bytes.Repeat([]byte{1}, 32))
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		select {
+		case <-r.Context().Done():
+		case <-time.After(3 * time.Second):
+		}
+	}))
+	defer server.Close()
+	auth := authn.New(db, codec, nil, server.Client())
+	blob, _ := auth.SealCredentials(f.Connection.ID, 1, map[string]any{"apiKey": "test", "token": "test"})
+	testutil.Exec(t, db, `UPDATE connections SET credential_blob=$2 WHERE id=$1`, f.Connection.ID, blob)
+	testutil.Exec(t, db, `UPDATE integrations SET base_url=$2 WHERE id=$1`, f.Integration.ID, server.URL)
+	testutil.Exec(t, db, `UPDATE actions SET execution_config='{"timeoutMs":100,"retryMode":"none"}' WHERE id=$1`, f.Action.ID)
+	if _, err := db.EnqueueSync(ctx, f.Task, "test", testutil.ID("request")); err != nil {
+		t.Fatal(err)
+	}
+	service := New(db, auth, executor.New(server.Client()), &catalog.Catalog{}, codec, server.Client(), slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
+	if _, err := service.work(ctx, "timeout-worker", []string{"sync_run"}); err != nil {
+		t.Fatal(err)
+	}
+	var status, runStatus string
+	if err := db.Pool().QueryRow(ctx, `SELECT j.status,o.status FROM jobs j JOIN operation_runs o ON o.id=j.operation_id WHERE j.workspace_id=$1 AND j.resource_id=$2 AND j.kind='sync_run'`, db.WorkspaceID(), f.Task.ID).Scan(&status, &runStatus); err != nil {
+		t.Fatal(err)
+	}
+	if status != "dead" || runStatus != "unknown" {
+		t.Fatalf("timeout may replay: %s %s", status, runStatus)
+	}
+	if _, err := service.work(ctx, "timeout-worker", []string{"sync_run"}); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("request repeated: %d", calls.Load())
 	}
 }

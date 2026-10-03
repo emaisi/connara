@@ -30,7 +30,7 @@ func listOptions(w http.ResponseWriter, r *http.Request) (store.ListOptions, boo
 		writeAdminError(w, 400, "invalid_input", "开始时间不能晚于结束时间")
 		return store.ListOptions{}, false
 	}
-	return store.ListOptions{Executable: r.URL.Query().Get("executable"), Group: r.URL.Query().Get("group"), Scope: r.URL.Query().Get("scope"), IntegrationID: r.URL.Query().Get("integration"), ConnectionID: r.URL.Query().Get("connection"), SyncTaskID: r.URL.Query().Get("task"), From: from, To: to, Limit: parseLimit(r, 100, 200), Before: before, ID: id, Query: r.URL.Query().Get("q"), Status: r.URL.Query().Get("status")}, true
+	return store.ListOptions{SystemKey: r.URL.Query().Get("system"), ActionID: r.URL.Query().Get("action"), Executable: r.URL.Query().Get("executable"), Group: r.URL.Query().Get("group"), Scope: r.URL.Query().Get("scope"), IntegrationID: r.URL.Query().Get("integration"), ConnectionID: r.URL.Query().Get("connection"), SyncTaskID: r.URL.Query().Get("task"), WorkflowID: r.URL.Query().Get("workflow"), From: from, To: to, Limit: parseLimit(r, 100, 200), Before: before, ID: id, Query: r.URL.Query().Get("q"), Status: r.URL.Query().Get("status")}, true
 }
 func nextCursor(w http.ResponseWriter, count, limit int, at time.Time, id string) {
 	if count == limit {

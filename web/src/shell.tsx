@@ -1,6 +1,5 @@
 import {
   Activity,
-  Workflow,
   Blocks,
   Cable,
   ChevronRight,
@@ -8,7 +7,6 @@ import {
   ClipboardCheck,
   ExternalLink,
   KeyRound,
-  Layers3,
   LifeBuoy,
   LogOut,
   Menu,
@@ -22,6 +20,7 @@ import {
   Sun,
   Users,
   Webhook,
+  Workflow,
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -32,33 +31,19 @@ import { Badge, Button, Card, cn } from "./ui";
 
 const navigation = [
   { path: "/", label: "概览", icon: CircleGauge },
+  { path: "/providers", label: "系统", icon: Cable },
+  { path: "/actions", label: "API", icon: SearchCode },
+  { path: "/integrations", label: "集成", icon: Blocks },
+  { path: "/auth", label: "认证中心", icon: KeyRound },
+  { path: "/operations", label: "运行记录", icon: Activity },
   {
-    id: "integrations",
-    label: "集成管理",
-    icon: Blocks,
-    items: [
-      { path: "/integrations", label: "集成配置", icon: Blocks },
-      { path: "/connections", label: "连接账号", icon: Layers3 },
-      { path: "/providers", label: "系统目录", icon: Cable },
-      { path: "/auth", label: "认证中心", icon: KeyRound },
-    ],
-  },
-  { path: "/actions", label: "API 操作", icon: SearchCode },
-  {
-    id: "automation",
-    label: "自动化",
-    icon: Workflow,
-    items: [
-      { path: "/sync", label: "同步任务", icon: RefreshCw },
-      { path: "/webhooks", label: "Webhook", icon: Webhook },
-    ],
-  },
-  { path: "/operations", label: "运行中心", icon: Activity },
-  {
-    id: "platform",
-    label: "平台管理",
+    id: "advanced",
+    label: "更多功能",
     icon: Settings2,
     items: [
+      { path: "/sync", label: "同步任务", icon: RefreshCw },
+      { path: "/workflows", label: "工作流", icon: Workflow },
+      { path: "/webhooks", label: "Webhook", icon: Webhook },
       { path: "/access", label: "访问控制", icon: ShieldCheck },
       { path: "/audit", label: "审计日志", icon: ClipboardCheck },
       { path: "/team", label: "团队管理", icon: Users },
@@ -86,6 +71,9 @@ const roleLabels: Record<string, string> = {
   viewer: "只读成员",
 };
 
+// 本地开发预填的登录密码，需与服务器上的 .admin-password 保持一致；对外部署前删除此预填。
+const devPrefillPassword = "31dd4998f3e46048f70e9dcc01a31031";
+
 export function Shell() {
   const location = useLocation();
   const demo = useDemo();
@@ -97,9 +85,9 @@ export function Shell() {
   useEffect(() => {
     setExpandedGroup(activeGroupId);
   }, [location.pathname, activeGroupId]);
-  const { language, setLanguage } = useLanguage();
+  const { language, setLanguage, t } = useLanguage();
   const [email, setEmail] = useState("admin@localhost");
-  const [password, setPassword] = useState("");
+  const [password, setPassword] = useState(devPrefillPassword);
   const [signingIn, setSigningIn] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
@@ -182,8 +170,8 @@ export function Shell() {
     };
   }, [desktop, mobileOpen]);
 
-  const currentTitle = pageTitles[location.pathname] ?? demo.platformName;
-  const currentSection = activeGroup?.label ?? "工作区";
+  const currentTitle = t(pageTitles[location.pathname] ?? demo.platformName);
+  const currentSection = t(activeGroup?.label ?? "工作区");
 
   if (!demo.authenticated) {
     return (
@@ -248,7 +236,9 @@ export function Shell() {
                 {demo.backendError}
               </p>
             )}
-            <Button disabled={signingIn || !email.trim() || !password}>{signingIn ? "正在登录…" : "登录控制台"}</Button>
+            <Button type="submit" loading={signingIn} disabled={signingIn || !email.trim() || !password}>
+              {signingIn ? "正在登录…" : "登录控制台"}
+            </Button>
           </form>
         </Card>
       </main>
@@ -317,7 +307,7 @@ export function Shell() {
                     )}
                   >
                     <entry.icon className="size-[18px] shrink-0" />
-                    <span className="truncate">{entry.label}</span>
+                    <span className="truncate">{t(entry.label)}</span>
                     <ChevronRight
                       aria-hidden="true"
                       className={cn(
@@ -342,7 +332,7 @@ export function Shell() {
                             )
                           }
                         >
-                          {item.label}
+                          {t(item.label)}
                         </NavLink>
                       ))}
                     </div>
@@ -364,7 +354,7 @@ export function Shell() {
                   }
                 >
                   <entry.icon className="size-[18px] shrink-0" />
-                  <span className="truncate">{entry.label}</span>
+                  <span className="truncate">{t(entry.label)}</span>
                 </NavLink>
               ),
             )}
@@ -386,7 +376,7 @@ export function Shell() {
               }
             >
               <item.icon className="size-4 shrink-0" />
-              {item.label}
+              {t(item.label)}
             </NavLink>
           ))}
           <a
@@ -411,9 +401,9 @@ export function Shell() {
             >
               <div className="border-b border-[var(--border)] px-3 py-2.5">
                 <p className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--muted-text)]">当前账号</p>
-                <p className="mt-1 truncate text-sm font-bold">{demo.user?.displayName || "管理员"}</p>
+                <p className="mt-1 truncate text-sm font-bold">{demo.user?.displayName || t("管理员")}</p>
                 <p className="truncate text-xs text-[var(--muted-text)]">{demo.user?.email}</p>
-                <Badge tone="info">{roleLabels[demo.user?.role ?? ""] ?? demo.user?.role ?? "成员"}</Badge>
+                <Badge tone="info">{t(roleLabels[demo.user?.role ?? ""] ?? demo.user?.role ?? "成员")}</Badge>
               </div>
               <NavLink
                 to="/team"
@@ -449,7 +439,7 @@ export function Shell() {
               {(demo.user?.displayName || demo.user?.email || "A").slice(0, 1).toUpperCase()}
             </span>
             <div className="min-w-0 flex-1">
-              <p className="truncate text-xs font-bold">{demo.user?.displayName || "管理员"}</p>
+              <p className="truncate text-xs font-bold">{demo.user?.displayName || t("管理员")}</p>
               <p className="truncate text-[10px] text-[var(--muted-text)]">{demo.user?.email}</p>
             </div>
             <ChevronRight
@@ -476,7 +466,7 @@ export function Shell() {
             <span className="truncate font-bold">{currentTitle}</span>
           </div>
           <Badge tone={demo.backendError ? "danger" : "success"}>
-            {demo.loading ? "同步中" : demo.backendError ? "连接异常" : "后端已连接"}
+            {t(demo.loading ? "同步中" : demo.backendError ? "连接异常" : "后端已连接")}
           </Badge>
           <div className="ml-auto flex items-center gap-1">
             <Button
@@ -523,7 +513,7 @@ export function Shell() {
           className={`fixed bottom-5 right-5 z-[60] flex max-w-[calc(100vw-2rem)] items-center gap-3 rounded-xl border px-4 py-3 text-sm font-semibold shadow-xl ${demo.noticeError ? "border-red-300 bg-red-50 text-red-800 dark:bg-red-950 dark:text-red-200" : "border-blue-300 bg-blue-50 text-blue-800 dark:bg-blue-950 dark:text-blue-200"}`}
         >
           <span aria-hidden="true">{demo.noticeError ? "!" : "✓"}</span>
-          {demo.notice}
+          {t(demo.notice)}
           <button type="button" onClick={demo.dismissNotice} aria-label="关闭提示">
             ×
           </button>

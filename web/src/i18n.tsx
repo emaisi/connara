@@ -6,17 +6,27 @@ export type Language = "zh-CN" | "en";
 interface LanguageContextValue {
   language: Language;
   setLanguage: (language: Language) => void;
+  t: (value: string) => string;
 }
 
 const LanguageContext = createContext<LanguageContextValue>({
   language: "zh-CN",
   setLanguage: () => undefined,
+  t: (value) => value,
 });
 
 const translations = english as Record<string, string>;
 const phrases = Object.entries(translations)
   .filter(([source]) => source.length >= 2)
   .sort(([left], [right]) => right.length - left.length);
+const templates: Array<[RegExp, string]> = [
+  [/^(\d+(?:\.\d+)?)\s*条$/, "$1 items"],
+  [/^已加载\s*(\d+)\s*条$/, "$1 items loaded"],
+  [/^(\d+)\s*个已配置$/, "$1 configured"],
+  [/^(\d+)\s*个连接待处理$/, "$1 connections need attention"],
+  [/^(\d+)\s*次运行需处理$/, "$1 runs need attention"],
+  [/^(\d+(?:\.\d+)?)%\s*成功$/, "$1% successful"],
+];
 interface TranslationState {
   source: string;
   rendered: string;
@@ -33,8 +43,10 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
 
   useLayoutEffect(() => {
     document.documentElement.lang = language;
+    document.title = language === "en" ? "APIHub Console" : "APIHub 管理台";
     window.localStorage.setItem("apihub.language", language);
     translateTree(document.body, language);
+    if (language === "zh-CN") return;
     const observer = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
         if (mutation.type === "characterData") translateTextNode(mutation.target as Text, language);
@@ -52,7 +64,7 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
     return () => observer.disconnect();
   }, [language]);
 
-  const value = useMemo(() => ({ language, setLanguage }), [language]);
+  const value = useMemo(() => ({ language, setLanguage, t: (text: string) => translate(text, language) }), [language]);
   return <LanguageContext.Provider value={value}>{children}</LanguageContext.Provider>;
 }
 
@@ -66,11 +78,16 @@ export function translate(value: string, language: Language): string {
   const trailing = value.match(/\s*$/)?.[0] ?? "";
   const content = value.slice(leading.length, value.length - trailing.length);
   if (translations[content]) return leading + translations[content] + trailing;
+  for (const [pattern, replacement] of templates) {
+    if (pattern.test(content)) return leading + content.replace(pattern, replacement) + trailing;
+  }
   let result = content;
   for (const [source, target] of phrases) {
     if (result.includes(source)) result = result.replaceAll(source, target);
   }
-  return leading + result + trailing;
+  // Never emit mechanically mixed Chinese/English text. New dynamic copy stays
+  // intact until it receives an explicit full-string or complete phrase mapping.
+  return leading + (hasChinese(result) ? content : result) + trailing;
 }
 
 function translateTree(root: Node, language: Language) {

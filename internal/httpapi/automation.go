@@ -350,6 +350,12 @@ func validHTTPSURL(value string) bool {
 	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil && parsed.Fragment == ""
 }
 
+// validAbsoluteURL accepts http and https so intranet endpoints without TLS can be registered.
+func validAbsoluteURL(value string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != "" && parsed.User == nil && parsed.Fragment == ""
+}
+
 func defaultJSON(value json.RawMessage, fallback string) json.RawMessage {
 	if len(value) == 0 || !json.Valid(value) {
 		return json.RawMessage(fallback)

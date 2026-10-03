@@ -48,7 +48,7 @@ describe("UI workflow regression", () => {
     const onChange = vi.fn();
     const { rerender } = render(
       <ConnectionCredentialFields
-        auth="Basic"
+        auth="basic"
         values={{ username: "saved", password: "secret" }}
         onChange={onChange}
       />,
@@ -56,7 +56,7 @@ describe("UI workflow regression", () => {
     expect(screen.getByLabelText("用户名 *")).toHaveValue("saved");
     rerender(
       <ConnectionCredentialFields
-        auth="Basic"
+        auth="basic"
         values={{ username: "saved", password: "secret" }}
         onChange={onChange}
       />,
@@ -103,5 +103,51 @@ describe("UI workflow regression", () => {
     expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
     finish();
     await waitFor(() => expect(screen.getByRole("button", { name: "保存" })).not.toBeDisabled());
+  });
+  it("marks a button busy while its click handler promise is pending", async () => {
+    let finish!: () => void;
+    const onClick = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    render(
+      <PermissionContext.Provider value="developer">
+        <Button onClick={onClick}>执行</Button>
+      </PermissionContext.Provider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "执行" }));
+    const button = screen.getByRole("button", { name: "执行" });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("aria-busy", "true");
+    expect(button.querySelector("svg.animate-spin")).not.toBeNull();
+    fireEvent.click(button);
+    expect(onClick).toHaveBeenCalledTimes(1);
+    finish();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "执行" })).not.toBeDisabled();
+      expect(screen.getByRole("button", { name: "执行" }).getAttribute("aria-busy")).toBe("false");
+    });
+  });
+  it("shows the busy state for a button controlled by the loading prop", () => {
+    render(
+      <PermissionContext.Provider value="developer">
+        <Button loading>提交</Button>
+      </PermissionContext.Provider>,
+    );
+    const button = screen.getByRole("button", { name: "提交" });
+    expect(button).toBeDisabled();
+    expect(button.querySelector("svg.animate-spin")).not.toBeNull();
+  });
+  it("keeps asChild buttons as a single child even while busy", () => {
+    render(
+      <PermissionContext.Provider value="developer">
+        <Button asChild variant="secondary" loading>
+          <a href="/integrations">创建集成配置</a>
+        </Button>
+      </PermissionContext.Provider>,
+    );
+    expect(screen.getByRole("link", { name: "创建集成配置" })).toHaveAttribute("href", "/integrations");
   });
 });

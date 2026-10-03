@@ -103,7 +103,7 @@ export function SyncTasksPage() {
           item.executable,
       );
     if (!selectedIntegration || !selectedConnection || !selectedAction) {
-      demo.notify("请选择集成、连接账号和 API 操作");
+      demo.notify("请选择集成、执行账号和 API 操作");
       return;
     }
     let parsedInput: Record<string, unknown>;
@@ -159,7 +159,7 @@ export function SyncTasksPage() {
             实时接口调用请使用“API 操作”；外部事件接收请使用“Webhook”。
           </p>
         </div>
-        <Button variant="secondary" onClick={() => void demo.reload()}>
+        <Button variant="secondary" onClick={() => demo.reload()}>
           <RefreshCw className="size-4" />
           刷新状态
         </Button>
@@ -242,12 +242,12 @@ export function SyncTasksPage() {
                 <Button
                   write
                   onClick={() => {
-                    if (item.id)
-                      void api
-                        .deploySyncTask(item.id)
-                        .then(() => Promise.all([loadSyncTasks(), demo.reload()]))
-                        .then(() => demo.notify(`同步任务 ${item.name} 已部署`))
-                        .catch((error) => demo.notify(error));
+                    if (!item.id) return;
+                    return api
+                      .deploySyncTask(item.id)
+                      .then(() => Promise.all([loadSyncTasks(), demo.reload()]))
+                      .then(() => demo.notify(`同步任务 ${item.name} 已部署`))
+                      .catch((error) => demo.notify(error));
                   }}
                 >
                   部署
@@ -458,14 +458,14 @@ export function SyncTasksPage() {
               <option>仅手动运行</option>
             </select>
           </Field>
-          <Field label="连接账号">
+          <Field label="执行账号">
             <select
               className={fieldClass}
               value={taskConnectionId}
               onChange={(event) => setTaskConnectionId(event.target.value)}
               required
             >
-              <option value="">请选择连接账号</option>
+              <option value="">请选择执行账号</option>
               {demo.connections
                 .filter((item) => item.integration === integration && item.status === "active")
                 .map((item) => (

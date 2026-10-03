@@ -11,7 +11,7 @@
 - 认证实例的 `publicConfig.verificationPath` 可配置只读 GET 探测路径。留空时连接可用但 `lastVerifiedAt` 为空，表示只检查了配置。填写后，只有上游返回 2xx 才记录验证时间。
 - 刷新等待上限 40 秒，锁 60 秒，Token HTTP 客户端上限 35 秒。等待者读取新修订；临时网络错误/5xx 不禁用连接；`invalid_grant` 要求重新授权。旋转后的 Token 使用独立五秒上下文持久化。
 - 幂等请求在发出上游调用前进入 running；尚未发送的失败请求释放 claim。运行结果和幂等响应在同一事务收尾，客户端取消不影响收尾上下文。网络错误的上游执行结果记为 unknown，重放已保存的错误响应，不再次发送。崩溃留下的 running 记录由清理器转为 unknown，不能自动释放重试。
-- worker 使用随机进程身份、每次领取一个任务、15 秒续租和 attempt 校验。过期领取者不能续租或提交；同一同步任务只允许一个 queued/running 作业。scheduler 的时间推进与入队同事务；每页同步的记录、检查点同事务，最后一页的运行状态和 outbox 也同事务。
+- worker 使用随机进程身份、独立的同步/Webhook 有限并发池、15 秒续租和 attempt 校验。每个执行槽一次只领取一个任务，忙碌时连续领取、空闲时退避；过期领取者不能续租或提交，同一资源只允许一个 queued/running 作业。scheduler 的时间推进与入队同事务；每页同步的记录、检查点同事务，最后一页的运行状态和 outbox 也同事务。
 - 系统、连接、操作与运行记录支持 `q/status/limit/cursor`（操作另有 `system`，运行另有 `kind`）；响应保持数组格式，`X-Next-Cursor` 指示下一页。页面按资源和筛选缓存，并有“加载更多”。配置选择器所用的目录索引会逐页缓存完整列表，以保留跨页选择能力；操作历史列表单独查询后端。
 - 同步记录使用 pgx batch 写入；运行令牌规则/授权连接并入一次查询；连接和令牌 `last_used_at` 最多每分钟更新一次。
 - 前端移除未使用的演示初始数据和旧页面，核心页面拆分并按路由懒加载；保存成功后才关闭表单；单个资源错误不会清空其它已加载资源。语言切换保留最新动态文字和属性，不再把加载条数、页面标题或提示恢复成旧值。
@@ -28,7 +28,7 @@ npm --prefix web ci
 ./scripts/start.sh
 ```
 
-`apihub-init` 优先读取 `APIHUB_MIGRATION_DATABASE_URL`，没有时使用 `APIHUB_DATABASE_URL`。只有该命令执行 DDL 和首次数据初始化。服务进程只检查 Schema v2，不再要求管理员初始密码哈希，也不会在重启时覆盖手工编辑的目录、角色或配置。老数据库以已有 platform_settings 记录确认已初始化；新数据库完成首次 bootstrap 后写标记。
+`apihub-init` 优先读取 `APIHUB_MIGRATION_DATABASE_URL`，没有时使用 `APIHUB_DATABASE_URL`。只有该命令执行 DDL 和首次数据初始化。服务进程只检查 Schema v3，不再要求管理员初始密码哈希，也不会在重启时覆盖手工编辑的目录、角色或配置。v3 增加模糊搜索索引、小时指标汇总、外键和状态约束；外键与 CHECK 以 `NOT VALID` 建立，立即约束新写入，历史数据可在维护窗口逐项 `VALIDATE CONSTRAINT`。老数据库以已有 platform_settings 记录确认已初始化；新数据库完成首次 bootstrap 后写标记。
 
 运行账号需要业务表 SELECT/INSERT/UPDATE/DELETE、schema_migrations 的 SELECT 和 schema USAGE；不需要 CREATE/ALTER/DROP。DDL 账号由运维单独保存。本次只在隔离本机实例上运行迁移，未对现有远程库执行升级。
 

@@ -6,7 +6,7 @@ import { cva, type VariantProps } from "class-variance-authority";
 import clsx, { type ClassValue } from "clsx";
 import { AlertCircle, CheckCircle2, Copy, Inbox, LoaderCircle, X } from "lucide-react";
 import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode, Ref } from "react";
-import { useEffect, useState, type FormHTMLAttributes } from "react";
+import { createContext, useContext, useEffect, useState, type FormHTMLAttributes } from "react";
 import { twMerge } from "tailwind-merge";
 
 export function cn(...values: ClassValue[]): string {
@@ -32,11 +32,24 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement>, VariantPr
   asChild?: boolean;
   write?: boolean;
   adminOnly?: boolean;
+  loading?: boolean;
   ref?: Ref<HTMLButtonElement>;
 }
 
-export function Button({ className, variant, asChild, ref, write = false, adminOnly = false, ...props }: ButtonProps) {
+const formPendingContext = createContext(false);
+
+export function Button({
+  className,
+  variant,
+  asChild,
+  ref,
+  write = false,
+  adminOnly = false,
+  loading = false,
+  ...props
+}: ButtonProps) {
   const canWrite = useCanWrite(adminOnly);
+  const formPending = useContext(formPendingContext);
   const [pending, setPending] = useState(false);
   const click = props.onClick;
   if (!asChild)
@@ -50,14 +63,26 @@ export function Button({ className, variant, asChild, ref, write = false, adminO
           .catch(() => undefined);
       }
     };
-  props.disabled = props.disabled || pending;
-  props["aria-busy"] = pending;
+  const busy = pending || loading || (formPending && (props.type ?? "submit") === "submit");
+  props.disabled = props.disabled || busy;
+  props["aria-busy"] = busy;
   if ((write || adminOnly) && !canWrite) {
     props.disabled = true;
     props.title = "当前角色没有操作权限";
   }
   const Component = asChild ? Slot : "button";
-  return <Component ref={ref} className={cn(buttonVariants({ variant }), className)} {...props} />;
+  return (
+    <Component ref={ref} className={cn(buttonVariants({ variant }), className)} {...props}>
+      {asChild ? (
+        props.children
+      ) : (
+        <>
+          {busy ? <LoaderCircle className="size-4 animate-spin" aria-hidden /> : null}
+          {props.children}
+        </>
+      )}
+    </Component>
+  );
 }
 
 export function Card({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
@@ -156,15 +181,18 @@ export function Modal({
   title,
   description,
   children,
+  unsavedChanges,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   title: string;
   description: string;
   children: ReactNode;
+  unsavedChanges?: boolean;
 }) {
   const [dirty, setDirty] = useState(false);
-  useUnsavedChanges(dirty && open);
+  const hasUnsavedChanges = unsavedChanges ?? dirty;
+  useUnsavedChanges(hasUnsavedChanges && open);
   useEffect(() => {
     if (!open) setDirty(false);
   }, [open]);
@@ -172,25 +200,27 @@ export function Modal({
     <Dialog.Root
       open={open}
       onOpenChange={(value) => {
-        if (!value && dirty && !window.confirm("存在尚未保存的输入，确认关闭？")) return;
+        if (!value && hasUnsavedChanges && !window.confirm("存在尚未保存的输入，确认关闭？")) return;
         onOpenChange(value);
       }}
     >
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-slate-950/55 backdrop-blur-[2px]" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[90vh] w-[min(94vw,34rem)] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-6 shadow-2xl focus:outline-none">
-          <div className="pr-10">
-            <Dialog.Title className="text-lg font-bold text-[var(--text)]">{title}</Dialog.Title>
-            <Dialog.Description className="mt-1 text-sm leading-6 text-[var(--muted-text)]">
-              {description}
-            </Dialog.Description>
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 flex max-h-[90vh] w-[min(94vw,34rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl focus:outline-none">
+          <div className="flex items-start justify-between gap-4 px-6 pt-6">
+            <div className="min-w-0">
+              <Dialog.Title className="text-lg font-bold text-[var(--text)]">{title}</Dialog.Title>
+              <Dialog.Description className="mt-1 text-sm leading-6 text-[var(--muted-text)]">
+                {description}
+              </Dialog.Description>
+            </div>
+            <Dialog.Close asChild>
+              <Button variant="ghost" className="size-8 shrink-0 p-0" aria-label="关闭">
+                <X className="size-4" />
+              </Button>
+            </Dialog.Close>
           </div>
-          <Dialog.Close asChild>
-            <Button variant="ghost" className="absolute right-4 top-4 size-8 p-0" aria-label="关闭">
-              <X className="size-4" />
-            </Button>
-          </Dialog.Close>
-          <div className="mt-5" onChangeCapture={() => setDirty(true)}>
+          <div className="mt-5 min-h-0 flex-1 overflow-y-auto px-6 pb-6" onChangeCapture={() => setDirty(true)}>
             {children}
           </div>
         </Dialog.Content>
@@ -266,7 +296,7 @@ export function MutationForm({
       }}
     >
       <fieldset disabled={!allowed || pending} className="contents">
-        {children}
+        <formPendingContext.Provider value={pending}>{children}</formPendingContext.Provider>
       </fieldset>
     </form>
   );

@@ -25,6 +25,7 @@ type oauthState struct {
 	ReturnPath     string `json:"returnPath"`
 	RedirectURI    string `json:"redirectUri"`
 	Verifier       string `json:"verifier"`
+	Nonce          string `json:"nonce,omitempty"`
 }
 
 func (a *api) oauthStart(w http.ResponseWriter, r *http.Request) {
@@ -53,7 +54,7 @@ func (a *api) oauthStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	instance, err := a.Store.AuthInstance(r.Context(), integration.AuthInstanceID)
-	if err != nil || instance.Status != "ready" || instance.AuthTemplateFlow != "oauth2_code" {
+	if err != nil || instance.Status != "ready" || (instance.AuthTemplateFlow != "oauth2_code" && instance.AuthTemplateFlow != "oidc") {
 		writeAdminError(w, http.StatusConflict, "oauth_not_supported", "integration does not use OAuth authorization code")
 		return
 	}
@@ -69,7 +70,7 @@ func (a *api) oauthStart(w http.ResponseWriter, r *http.Request) {
 	}{}
 	_ = jsonutil.Unmarshal(instance.PublicConfig, &config)
 	authorizeURL, err := url.Parse(config.AuthorizationURL)
-	if err != nil || authorizeURL.Scheme != "https" || authorizeURL.Host == "" {
+	if err != nil || (authorizeURL.Scheme != "http" && authorizeURL.Scheme != "https") || authorizeURL.Host == "" {
 		writeAdminError(w, http.StatusConflict, "oauth_not_configured", "authorizationUrl is missing from the authentication instance publicConfig")
 		return
 	}
@@ -82,6 +83,12 @@ func (a *api) oauthStart(w http.ResponseWriter, r *http.Request) {
 	if clientID == "" {
 		writeAdminError(w, http.StatusConflict, "oauth_not_configured", "OAuth clientId is missing")
 		return
+	}
+	if instance.AuthTemplateFlow == "oidc" {
+		if err := a.Auth.VerifyOIDCProvider(r.Context(), instance); err != nil {
+			writeAdminError(w, http.StatusConflict, "oidc_not_configured", err.Error())
+			return
+		}
 	}
 	base := ""
 	settings, settingsErr := a.Store.Settings(r.Context())
@@ -100,6 +107,9 @@ func (a *api) oauthStart(w http.ResponseWriter, r *http.Request) {
 	verifier := strings.TrimPrefix(newToken(), "hub_rt_")
 	challengeBytes := sha256.Sum256([]byte(verifier))
 	state := oauthState{IntegrationID: integration.ID, SystemKey: integration.SystemKey, EndUserKey: request.EndUserKey, EndUserName: request.EndUserName, ConnectionKey: request.ConnectionKey, ConnectionName: request.ConnectionName, ReturnPath: safeReturnPath(request.ReturnPath), RedirectURI: redirectURI, Verifier: verifier}
+	if instance.AuthTemplateFlow == "oidc" {
+		state.Nonce = newToken()
+	}
 	encoded, _ := json.Marshal(state)
 	if err := a.Cache.PutOAuthState(r.Context(), tokenHash(stateToken), encoded, 10*time.Minute); err != nil {
 		writeAdminError(w, http.StatusServiceUnavailable, "oauth_state_unavailable", "Could not create OAuth state")
@@ -115,8 +125,12 @@ func (a *api) oauthStart(w http.ResponseWriter, r *http.Request) {
 	if len(config.Scopes) > 0 {
 		query.Set("scope", strings.Join(config.Scopes, " "))
 	}
+	if state.Nonce != "" {
+		query.Set("scope", strings.TrimSpace("openid "+query.Get("scope")))
+		query.Set("nonce", state.Nonce)
+	}
 	for key, value := range config.AuthorizationParams {
-		if key != "state" && key != "redirect_uri" && key != "client_id" {
+		if key != "state" && key != "redirect_uri" && key != "client_id" && key != "response_type" && key != "code_challenge" && key != "code_challenge_method" && key != "nonce" && key != "scope" {
 			query.Set(key, value)
 		}
 	}
@@ -126,6 +140,16 @@ func (a *api) oauthStart(w http.ResponseWriter, r *http.Request) {
 
 func (a *api) oauthCallback(w http.ResponseWriter, r *http.Request) {
 	if providerError := clean(r.URL.Query().Get("error"), 200); providerError != "" {
+		if stateToken := r.URL.Query().Get("state"); stateToken != "" && a.Cache != nil {
+			encoded, err := a.Cache.TakeOAuthState(r.Context(), tokenHash(stateToken))
+			var state oauthState
+			if err == nil && jsonutil.Unmarshal(encoded, &state) == nil && state.SystemKey == chi.URLParam(r, "systemKey") {
+				if target := oauthResultPath(state.ReturnPath, "error", ""); target != "" {
+					http.Redirect(w, r, target, http.StatusFound)
+					return
+				}
+			}
+		}
 		writeAdminError(w, http.StatusBadRequest, "oauth_provider_error", providerError)
 		return
 	}
@@ -150,7 +174,7 @@ func (a *api) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	instance, err := a.Store.AuthInstance(r.Context(), integration.AuthInstanceID)
-	if err != nil || instance.Status != "ready" || instance.AuthTemplateFlow != "oauth2_code" {
+	if err != nil || instance.Status != "ready" || (instance.AuthTemplateFlow != "oauth2_code" && instance.AuthTemplateFlow != "oidc") {
 		writeAdminError(w, http.StatusBadRequest, "oauth_auth_invalid", "OAuth authentication instance no longer exists")
 		return
 	}
@@ -189,6 +213,13 @@ func (a *api) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusBadGateway, "oauth_exchange_failed", err.Error())
 		return
 	}
+	if instance.AuthTemplateFlow == "oidc" {
+		if err := a.Auth.VerifyOIDCTokens(r.Context(), instance, tokens, state.Nonce); err != nil {
+			_ = a.Store.CompleteOperation(r.Context(), operation.ID, "failed", http.StatusBadGateway, nil, "oidc_verification_failed", err.Error())
+			writeAdminError(w, http.StatusBadGateway, "oidc_verification_failed", err.Error())
+			return
+		}
+	}
 	id := store.StableID("connection", a.Store.WorkspaceID()+":"+state.ConnectionKey)
 	expectedRevision := int64(0)
 	if current, currentErr := a.Store.Connection(r.Context(), id); currentErr == nil {
@@ -212,12 +243,8 @@ func (a *api) oauthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = a.Store.AddOperationEvent(r.Context(), operation.ID, "info", "OAuth 令牌已加密保存", nil)
 	_ = a.Store.CompleteOperation(r.Context(), operation.ID, "success", http.StatusCreated, store.MarshalJSON(map[string]any{"connectionId": connection.ID}), "", "")
-	if state.ReturnPath != "" {
-		separator := "?"
-		if strings.Contains(state.ReturnPath, "?") {
-			separator = "&"
-		}
-		http.Redirect(w, r, state.ReturnPath+separator+"oauth=success&connectionId="+url.QueryEscape(connection.ID), http.StatusFound)
+	if target := oauthResultPath(state.ReturnPath, "success", connection.ID); target != "" {
+		http.Redirect(w, r, target, http.StatusFound)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"connected": true, "connection": connection})
@@ -238,4 +265,18 @@ func safeReturnPath(value string) string {
 		return value
 	}
 	return ""
+}
+
+func oauthResultPath(returnPath, result, connectionID string) string {
+	target, err := url.Parse(safeReturnPath(returnPath))
+	if err != nil || target.Path == "" {
+		return ""
+	}
+	query := target.Query()
+	query.Set("oauth", result)
+	if connectionID != "" {
+		query.Set("connectionId", connectionID)
+	}
+	target.RawQuery = query.Encode()
+	return target.String()
 }

@@ -23,12 +23,46 @@ var schema string
 //go:embed migrations/002_hardening.sql
 var hardeningSchema string
 
+//go:embed migrations/003_optimization.sql
+var optimizationSchema string
+
+//go:embed migrations/004_workflows.sql
+var workflowsSchema string
+
+//go:embed migrations/006_system_apis.sql
+var systemAPIsSchema string
+
+//go:embed migrations/005_auth_extensions.sql
+var authExtensionsSchema string
+
 type Store struct {
 	pool        *pgxpool.Pool
 	workspaceID string
 }
 
+type transactionContextKey struct{}
+
+type transactionState struct {
+	tx  pgx.Tx
+	err error
+}
+
+type database interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+type PoolOptions struct {
+	MaxConns int32
+	MinConns int32
+}
+
 func Open(ctx context.Context, databaseURL, workspaceID string) (*Store, error) {
+	return OpenWithOptions(ctx, databaseURL, workspaceID, PoolOptions{MaxConns: 20, MinConns: 2})
+}
+
+func OpenWithOptions(ctx context.Context, databaseURL, workspaceID string, options PoolOptions) (*Store, error) {
 	if strings.TrimSpace(databaseURL) == "" {
 		return nil, errors.New("database URL is required")
 	}
@@ -39,8 +73,11 @@ func Open(ctx context.Context, databaseURL, workspaceID string) (*Store, error) 
 	if err != nil {
 		return nil, fmt.Errorf("parse PostgreSQL URL: %w", err)
 	}
-	poolConfig.MaxConns = 20
-	poolConfig.MinConns = 2
+	if options.MaxConns < 1 || options.MinConns < 0 || options.MinConns > options.MaxConns {
+		return nil, errors.New("invalid PostgreSQL pool size")
+	}
+	poolConfig.MaxConns = options.MaxConns
+	poolConfig.MinConns = options.MinConns
 	poolConfig.MaxConnIdleTime = 5 * time.Minute
 	poolConfig.MaxConnLifetime = time.Hour
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
@@ -69,6 +106,45 @@ func (s *Store) WorkspaceID() string { return s.workspaceID }
 
 func (s *Store) Pool() *pgxpool.Pool { return s.pool }
 
+func (s *Store) database(ctx context.Context) database {
+	if state, ok := ctx.Value(transactionContextKey{}).(*transactionState); ok {
+		return state.tx
+	}
+	return s.pool
+}
+
+func (s *Store) withTx(ctx context.Context, fn func(pgx.Tx) error) error {
+	if state, ok := ctx.Value(transactionContextKey{}).(*transactionState); ok {
+		return fn(state.tx)
+	}
+	return pgx.BeginFunc(ctx, s.pool, fn)
+}
+
+// InTransaction makes all Store calls using the returned context share one
+// transaction. AbortTransaction lets a late write, such as an audit record,
+// prevent an otherwise successful request from committing.
+func (s *Store) InTransaction(ctx context.Context, fn func(context.Context) error) error {
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		state := &transactionState{tx: tx}
+		err := fn(context.WithValue(ctx, transactionContextKey{}, state))
+		if err != nil {
+			return err
+		}
+		return state.err
+	})
+}
+
+func (s *Store) AbortTransaction(ctx context.Context, err error) bool {
+	state, ok := ctx.Value(transactionContextKey{}).(*transactionState)
+	if !ok {
+		return false
+	}
+	if state.err == nil {
+		state.err = err
+	}
+	return true
+}
+
 func (s *Store) Migrate(ctx context.Context) error {
 	conn, err := s.pool.Acquire(ctx)
 	if err != nil {
@@ -87,7 +163,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return fmt.Errorf("ensure schema migrations: %w", err)
 	}
 
-	for index, migration := range []string{schema, hardeningSchema} {
+	for index, migration := range []string{schema, hardeningSchema, optimizationSchema, workflowsSchema, authExtensionsSchema, systemAPIsSchema} {
 		version := index + 1
 		var applied bool
 		if err := conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=$1)`, version).Scan(&applied); err != nil {
@@ -160,11 +236,11 @@ func jsonOrArray(value []byte) []byte {
 
 func (s *Store) CheckSchema(ctx context.Context) error {
 	var latest int
-	if err := s.pool.QueryRow(ctx, `SELECT COALESCE(max(version),0) FROM schema_migrations`).Scan(&latest); err != nil {
+	if err := s.database(ctx).QueryRow(ctx, `SELECT COALESCE(max(version),0) FROM schema_migrations`).Scan(&latest); err != nil {
 		return fmt.Errorf("run apihub-init with migration credentials first: %w", err)
 	}
-	if latest != 2 {
-		return fmt.Errorf("schema version %d unsupported; run apihub-init (expected 2)", latest)
+	if latest != 6 {
+		return fmt.Errorf("schema version %d unsupported; run apihub-init (expected 6)", latest)
 	}
 	return nil
 }

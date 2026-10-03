@@ -25,7 +25,7 @@ type AdminSession struct {
 
 func (s *Store) AdminUserByEmail(ctx context.Context, email string) (AdminUser, error) {
 	var item AdminUser
-	err := s.pool.QueryRow(ctx, `
+	err := s.database(ctx).QueryRow(ctx, `
 		SELECT u.id::text, u.email, u.display_name, COALESCE(u.password_hash, ''),
 		       wm.role, u.auth_version
 		FROM users u
@@ -36,7 +36,7 @@ func (s *Store) AdminUserByEmail(ctx context.Context, email string) (AdminUser, 
 }
 
 func (s *Store) CreateAdminSession(ctx context.Context, id, userID, tokenHash, ipAddress, userAgent string, authVersion int64, expiresAt time.Time) error {
-	_, err := s.pool.Exec(ctx, `
+	_, err := s.database(ctx).Exec(ctx, `
 		INSERT INTO user_sessions(
 			id, user_id, workspace_id, token_hash, auth_version,
 			ip_address, user_agent, expires_at, last_used_at
@@ -47,7 +47,7 @@ func (s *Store) CreateAdminSession(ctx context.Context, id, userID, tokenHash, i
 
 func (s *Store) AdminSessionByTokenHash(ctx context.Context, tokenHash string) (AdminSession, error) {
 	var item AdminSession
-	err := s.pool.QueryRow(ctx, `
+	err := s.database(ctx).QueryRow(ctx, `
 		SELECT us.id::text, u.id::text, u.email, u.display_name, wm.role, us.expires_at
 		FROM user_sessions us
 		JOIN users u ON u.id = us.user_id
@@ -60,7 +60,7 @@ func (s *Store) AdminSessionByTokenHash(ctx context.Context, tokenHash string) (
 	if err != nil {
 		return AdminSession{}, mapNotFound(err)
 	}
-	_, _ = s.pool.Exec(ctx, `
+	_, _ = s.database(ctx).Exec(ctx, `
 		UPDATE user_sessions SET last_used_at = now()
 		WHERE workspace_id = $1 AND id = $2
 		  AND (last_used_at IS NULL OR last_used_at < now() - interval '5 minutes')`, s.workspaceID, item.ID)
@@ -68,7 +68,7 @@ func (s *Store) AdminSessionByTokenHash(ctx context.Context, tokenHash string) (
 }
 
 func (s *Store) RevokeAdminSession(ctx context.Context, tokenHash string) error {
-	_, err := s.pool.Exec(ctx, `
+	_, err := s.database(ctx).Exec(ctx, `
 		UPDATE user_sessions SET revoked_at = now()
 		WHERE workspace_id = $1 AND token_hash = $2 AND revoked_at IS NULL`, s.workspaceID, tokenHash)
 	return err

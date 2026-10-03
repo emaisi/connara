@@ -1,8 +1,10 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -16,6 +18,49 @@ type contextKey string
 
 const runtimeTokenKey contextKey = "runtime-token"
 const adminIdentityKey contextKey = "admin-identity"
+
+var errRollbackResponse = errors.New("rollback request transaction")
+
+type bufferedResponse struct {
+	header http.Header
+	body   bytes.Buffer
+	status int
+}
+
+func newBufferedResponse() *bufferedResponse {
+	return &bufferedResponse{header: make(http.Header)}
+}
+
+func (w *bufferedResponse) Header() http.Header { return w.header }
+
+func (w *bufferedResponse) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+}
+
+func (w *bufferedResponse) Write(value []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.body.Write(value)
+}
+
+func (w *bufferedResponse) flush(destination http.ResponseWriter) {
+	for name, values := range w.header {
+		for _, value := range values {
+			destination.Header().Add(name, value)
+		}
+	}
+	status := w.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	destination.WriteHeader(status)
+	if w.body.Len() > 0 {
+		_, _ = destination.Write(w.body.Bytes())
+	}
+}
 
 type adminIdentity struct {
 	SessionID   string `json:"-"`
@@ -68,7 +113,7 @@ func allowsAdmin(role, method, route string) bool {
 	if role == "viewer" {
 		return false
 	}
-	for _, prefix := range []string{"/api/system-groups", "/api/systems", "/api/auth-templates", "/api/auth-instances", "/api/integrations", "/api/connections", "/api/actions", "/api/sync-tasks", "/api/webhook-endpoints", "/api/webhook-sources", "/api/webhook-deliveries", "/api/oauth/start"} {
+	for _, prefix := range []string{"/api/system-groups", "/api/systems", "/api/auth-templates", "/api/auth-instances", "/api/integrations", "/api/connections", "/api/actions", "/api/sync-tasks", "/api/workflows", "/api/webhook-endpoints", "/api/webhook-sources", "/api/webhook-deliveries", "/api/oauth/start"} {
 		if route == prefix || strings.HasPrefix(route, prefix+"/") {
 			return true
 		}
@@ -116,6 +161,29 @@ func currentAdmin(r *http.Request) adminIdentity {
 	return identity
 }
 
+func (a *api) audited(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		response := newBufferedResponse()
+		err := a.Store.InTransaction(r.Context(), func(ctx context.Context) error {
+			next(response, r.WithContext(ctx))
+			if response.status >= http.StatusBadRequest {
+				return errRollbackResponse
+			}
+			return nil
+		})
+		if errors.Is(err, errRollbackResponse) {
+			response.flush(w)
+			return
+		}
+		if err != nil {
+			a.Logger.ErrorContext(r.Context(), "commit audited request", "error", err)
+			writeAdminError(w, http.StatusInternalServerError, "audit_transaction_failed", "The operation could not be committed with its audit record")
+			return
+		}
+		response.flush(w)
+	}
+}
+
 func secureEqual(left, right string) bool {
 	if len(left) != len(right) {
 		return false
@@ -136,6 +204,9 @@ func (a *api) accessLog(next http.Handler) http.Handler {
 		wrapped := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 		started := time.Now()
 		next.ServeHTTP(wrapped, r)
+		if strings.HasPrefix(r.URL.Path, "/health") && wrapped.Status() < http.StatusBadRequest {
+			return
+		}
 		a.Logger.Log(r.Context(), slog.LevelInfo, "HTTP request",
 			"request_id", middleware.GetReqID(r.Context()),
 			"method", r.Method,

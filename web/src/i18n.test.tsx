@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { LanguageProvider, useLanguage } from "./i18n";
+import { LanguageProvider, translate, useLanguage } from "./i18n";
 
 const values = new Map<string, string>();
 
@@ -45,6 +45,13 @@ function DynamicExample({ text }: { text: string }) {
 }
 
 describe("language switching", () => {
+  it("uses explicit dynamic templates without emitting mixed-language fragments", () => {
+    expect(translate("按五步完成系统接入和验证", "en")).toBe("Complete system access and verification in five steps");
+    expect(translate("已加载 105 条", "en")).toBe("105 items loaded");
+    expect(translate("105 条", "en")).toBe("105 items");
+    expect(translate("新的系统文案", "en")).toBe("新的系统文案");
+  });
+
   it("translates visible text and accessible labels and persists the language", () => {
     render(
       <LanguageProvider>
@@ -56,6 +63,7 @@ describe("language switching", () => {
     expect(screen.getByLabelText("Email Account")).toHaveAttribute("placeholder", "Enter your password");
     expect(window.localStorage.getItem("apihub.language")).toBe("en");
     expect(document.documentElement.lang).toBe("en");
+    expect(document.title).toBe("APIHub Console");
   });
 
   it("keeps asynchronous loading and pagination updates in Chinese", async () => {

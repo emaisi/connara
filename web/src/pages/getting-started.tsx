@@ -1,7 +1,7 @@
 import { useResourcePages } from "../pagination";
 import { ErrorState } from "../ui";
 import { useState } from "react";
-import { ArrowRight, Blocks, Cable, Check, CirclePlay, Layers3, RefreshCw, Webhook } from "lucide-react";
+import { ArrowRight, Blocks, Cable, Check, CirclePlay, RefreshCw, Webhook } from "lucide-react";
 
 import { Link } from "react-router";
 import { useDemo } from "../demo";
@@ -32,27 +32,31 @@ export function GettingStartedPage() {
   const context = selected
     ? `?system=${encodeURIComponent(selected.provider)}&integration=${encodeURIComponent(selected.name)}${selectedConnection ? `&connection=${encodeURIComponent(selectedConnection.id)}` : ""}`
     : "";
+  const startConnect = selected
+    ? `/auth?section=accounts&new=1&integration=${encodeURIComponent(selected.name)}`
+    : "/auth?section=instances&create=1";
   const steps = [
-    ["选择或添加系统", "从公共平台目录中选择系统，或者添加企业内部系统、分组和认证实例。", Cable, "/providers"],
-    ["配置认证实例", "为所选系统配置认证方式和请求注入规则。", Layers3, "/auth"],
-    ["创建集成配置", "选择系统、API 基础地址与已绑定的认证实例。", Blocks, "/integrations"],
-    ["创建连接账号", "为最终用户、企业租户或服务账号安全保存真实凭据。", Layers3, "/connections"],
-    ["验证第一个操作", "选择连接账号，验证权限、凭据注入和 API 返回结构。", CirclePlay, "/actions"],
+    ["选择系统", "从系统目录选择已有系统，或添加自建系统。", Cable, "/providers"],
+    ["接入系统", "一次配置认证、API 地址和首个账号。", Blocks, startConnect],
+    ["验证 API", "选择账号并验证首个 API 操作。", CirclePlay, "/actions"],
   ] as const;
   const completed = [
     Boolean(selected),
-    Boolean(
-      selected &&
-      demo.authInstances.some((instance) => instance.id === selected.authInstanceId && instance.status === "ready"),
-    ),
-    Boolean(selected?.status === "ready"),
     Boolean(selected && selectedConnection?.status === "active"),
     Boolean(selected && selectedConnection && successfulCalls.items.length),
   ];
   const done = completed.filter(Boolean).length;
   return (
     <div className="grid gap-6">
-      <PageHeader title="快速开始" description="按五个核心步骤完成系统接入、连接账号和操作验证。" />
+      <PageHeader
+        title="快速开始"
+        description="选择系统，一次配置认证、API 地址和账号，然后验证 API。"
+        actions={
+          <Button asChild write>
+            <Link to={startConnect}>开始接入</Link>
+          </Button>
+        }
+      />
       <label className="grid gap-2 text-sm">
         接入目标
         <select
@@ -63,7 +67,7 @@ export function GettingStartedPage() {
             setSelectedConnectionId("");
           }}
         >
-          <option value="">请选择集成；尚无集成时从第一步开始</option>
+          <option value="">选择已有集成，或从“接入系统”开始</option>
           {demo.integrations.map((item) => (
             <option translate="no" key={item.id} value={item.name}>
               {item.displayName} · {item.name}
@@ -135,7 +139,7 @@ export function GettingStartedPage() {
                   <p className="mt-1 text-sm text-[var(--muted-text)]">{description}</p>
                 </div>
                 <Button asChild variant="secondary">
-                  <Link to={to + context}>
+                  <Link to={to + (to.includes("?") && context ? `&${context.slice(1)}` : context)}>
                     打开{title} <ArrowRight className="size-4" />
                   </Link>
                 </Button>
