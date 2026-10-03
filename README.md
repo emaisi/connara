@@ -39,7 +39,7 @@ Connara combines a system/action catalog with connection and authentication mana
 | Connected accounts | Save credentials for users, tenants, or service accounts; update credentials; verify access; and distinguish configuration checks from successful upstream verification. Credentials are encrypted with AES-256-GCM. |
 | API actions | Define HTTP methods and relative paths, input/output schemas, and required scopes. Validate input, explicitly select an integration and connection, execute a test, inspect results, and copy a matching cURL command. |
 | Synchronization | Configure manual or scheduled tasks, record extraction, stable record IDs, pagination, and checkpoints. Deploy, pause, resume, inspect stored records, and open the associated run. |
-| Workflows | Compose multiple registered API actions into step chains or DAGs: `{{trigger.*}}` and upstream-alias template mapping (JSON types preserved), restricted `runIf` conditional skips, `onError=continue` failure tolerance with warnings, and a final output mapping. Manual, fixed-interval, and five-field cron (IANA timezone) schedules are supported. Runtime triggers return the mapped output synchronously by default; `?async=1` queues the run for polling with the same token. Triggering pins the graph, inputs, bindings, and action versions — later edits never affect accepted runs. v1 executes serially without automatic retries. |
+| Workflows | Build step chains and DAGs in a React Flow editor with API, data-processing, restricted JavaScript, condition, start, and end nodes. Configure typed inputs, variables, branch scopes, explicit output mappings, manual/fixed-interval/cron schedules, preview, deployment, and frozen run history. Runtime calls support synchronous results or `?async=1` polling with the same token. Accepted runs pin the graph, inputs, bindings, and action versions. The v2 editor and code worker are feature-gated and disabled by default. |
 | Webhooks | Manage inbound event sources and outbound notification endpoints. Verify/sign events, deduplicate incoming events, retry deliveries, and inspect delivery attempts. |
 | Operations | View calls, sync runs, authentication events, and Webhooks. Filter by integration, connection, status, and time; open run details directly by URL. Unknown upstream outcomes are shown separately. |
 | Access and audit | Issue runtime tokens with explicit action and connection scopes, revoke tokens, search audit history, and export the records currently loaded in the console. |
@@ -77,7 +77,7 @@ The sidebar has four main entries. Related pages appear in collapsible groups, w
 
 ## Screenshots
 
-Captured from the running console on **2026-09-17**, before the project was renamed from APIHub to Connara. The screenshots retain the original APIHub header. Desktop views use the English UI at 1440 × 1000; mobile navigation is captured at 390 × 844. These are real application screenshots with built-in catalog data; integrations and run history remain empty until configured. Some current English UI copy still contains untranslated Chinese fragments. The [Chinese README](README.zh-CN.md#后台截图) contains the corresponding Chinese screenshots.
+The catalog, authentication, API-action, and navigation screenshots below were captured from the running console on **2026-09-17**, before the project was renamed from APIHub to Connara. The current workflow editor screenshots were captured from the embedded console on **2026-10-04**. The images retain the APIHub header while binary and environment-variable compatibility names remain in use. No credentials or private business data are shown.
 
 ### System catalog
 
@@ -90,6 +90,19 @@ Captured from the running console on **2026-09-17**, before the project was rena
 ### API actions
 
 ![API action definitions and the five-step integration workflow](docs/screenshots/actions.en.png)
+
+### Visual workflow editor
+
+The editor keeps creation and view controls inside the canvas, supports keyboard-accessible labels and hints, and uses the step-list view on narrow screens. These screenshots show a new unsaved workflow; no workflow was created or deployed while capturing them.
+
+![Visual workflow editor with canvas tools on the left](docs/assets/workflows/ux-canvas-left-8081-1280.png)
+
+<details>
+<summary>Mobile workflow graph</summary>
+
+<img src="docs/assets/workflows/ux-canvas-left-8081-mobile.png" alt="Visual workflow editor graph at 390 pixels wide" width="300" />
+
+</details>
 
 <details>
 <summary>Mobile navigation</summary>
@@ -407,6 +420,7 @@ docs/                        Design notes, upgrade notes, and console screenshot
 - [Base SQL schema](internal/store/schema.sql) and [v2 migration](internal/store/migrations/002_hardening.sql).
 - [Upgrade procedures and Webhook protocol](docs/hardening-upgrade.md) — Chinese; historical rollout notes refer to their recorded date.
 - [Screenshot provenance](docs/screenshots/README.md).
+- [Visual workflow design](docs/workflow-visual-editor-development-plan.md), [runtime setup](docs/workflow-code-runtime.md), and [implementation validation](docs/workflow-validation-report.md) — Chinese.
 
 ## Workflow v2 and restricted JavaScript
 

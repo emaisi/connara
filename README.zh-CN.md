@@ -39,7 +39,7 @@ Connara 是一个可自行部署的 API 集成平台，用于连接外部服务�
 | 连接账号 | 保存最终用户、租户或服务账号的凭据，更新凭据、验证访问，并区分配置检查和真实上游验证。凭据使用 AES-256-GCM 加密。 |
 | API 操作 | 定义 HTTP 方法、相对路径、输入输出 Schema 和所需权限；校验输入，明确选择集成与连接，测试执行，查看结果并复制对应的 cURL。 |
 | 同步任务 | 配置手动或定时任务、记录提取路径、稳定主键、分页和检查点；支持部署、暂停、恢复、查看已保存记录及关联运行。 |
-| 工作流 | 把多个已注册 API 操作编排成步骤链或 DAG：`{{trigger.*}}` 与上游别名模板传值（保留 JSON 类型）、受限 runIf 条件跳过、`onError=continue` 容忍失败并标记警告、最终输出映射。支持手动、固定间隔与五字段 cron（IANA 时区）调度。运行时默认同步返回映射结果，`?async=1` 异步排队后用同一 Token 查询结果；触发即固定图、输入、绑定与 action 版本，编辑不影响已接受的运行。v1 串行执行且不自动重试。 |
+| 工作流 | 在 React Flow 可视化编辑器中编排步骤链与 DAG，支持开始、API、数据处理、受限 JavaScript、条件和结束节点，以及类型化输入、流程变量、分支作用域、显式输出映射、预览、部署和冻结运行历史。支持手动、固定间隔与五字段 cron 调度；运行时可同步取结果，也可通过 `?async=1` 排队并用同一 Token 查询。已接受的运行固定图、输入、绑定与操作版本。v2 编辑器和代码 Worker 受功能开关控制，默认关闭。 |
 | Webhook | 管理入站事件源和出站通知端点；事件验签与签名、入站去重、失败重试，以及投递尝试详情。 |
 | 运行中心 | 查看接口调用、同步、认证及 Webhook 记录；按集成、连接、状态和时间筛选，通过 URL 直达详情，单独展示上游结果未知的情况。 |
 | 访问控制与审计 | 签发明确限定操作及连接范围的运行时 Token，撤销 Token，搜索审计记录，导出界面当前已加载的数据。 |
@@ -77,7 +77,7 @@ OAuth 1.0a、服务商专用 HMAC、SAML 断言生成与验证、Kerberos/NTLM �
 
 ## 后台截图
 
-以下截图于 **2026-09-17** 从实际运行的后台获取，拍摄时项目尚未从 APIHub 更名为 Connara，因此图片保留原 APIHub 标题。桌面尺寸为 1440 × 1000，手机导航为 390 × 844。截图使用内置目录数据；集成和运行记录需要配置后才会出现，没有填入演示统计。[英文 README](README.md#screenshots) 提供对应的英文界面截图；当前英文界面仍有部分尚未翻译的中文片段。
+系统目录、认证中心、API 操作和导航截图于 **2026-09-17** 从实际运行的后台获取；当前工作流编辑器截图于 **2026-10-04** 从内嵌前端的 8081 服务获取。项目已经更名为 Connara，但二进制和环境变量仍保留 APIHub 兼容名称，因此图片继续显示 APIHub 标题。截图不包含凭据或私有业务数据。
 
 ### 系统目录
 
@@ -90,6 +90,19 @@ OAuth 1.0a、服务商专用 HMAC、SAML 断言生成与验证、Kerberos/NTLM �
 ### API 操作
 
 ![API 操作定义与五步接入流程](docs/screenshots/actions.zh-CN.png)
+
+### 可视化工作流编辑器
+
+编辑工具和视图工具收进画布，图标保留中文可访问名称与悬停说明；窄屏使用步骤列表，并可切换只读图。以下截图使用未保存的新工作流，采集过程中没有创建或部署工作流。
+
+![左侧画布工具与光标定位圈](docs/assets/workflows/ux-canvas-left-8081-1280.png)
+
+<details>
+<summary>查看手机端工作流画布</summary>
+
+<img src="docs/assets/workflows/ux-canvas-left-8081-mobile.png" alt="390 像素宽的手机端工作流画布" width="300" />
+
+</details>
 
 <details>
 <summary>查看手机端导航</summary>
@@ -402,6 +415,7 @@ docs/                        设计说明、升级说明和后台截图
 - [基础 SQL](internal/store/schema.sql)及 [v2 增量迁移](internal/store/migrations/002_hardening.sql)。
 - [升级步骤与 Webhook 协议](docs/hardening-upgrade.md)：历史实施状态以该文档记录日期为准。
 - [截图来源说明](docs/screenshots/README.md)。
+- [可视化工作流设计](docs/workflow-visual-editor-development-plan.md)、[代码运行维护](docs/workflow-code-runtime.md)和[开发验收记录](docs/workflow-validation-report.md)。
 
 ## 当前能力边界
 

@@ -16,6 +16,10 @@ Desktop viewport: **1440 × 1000**. Mobile viewport: **390 × 844**. Theme: **li
 
 桌面视口为 **1440 × 1000**，手机视口为 **390 × 844**，使用浅色主题和 **agent-browser** 截图。两种语言分别切换实际 UI 语言后获取；英文画面中的未翻译文本按实际保留，没有通过编辑图片伪造翻译效果。
 
+The current visual workflow editor screenshots and their capture boundaries are documented in [the workflow screenshot index](../assets/workflows/README.md).
+
+当前可视化工作流编辑器截图及采集边界见[工作流截图说明](../assets/workflows/README.md)。
+
 To refresh / 更新截图：
 
 1. Start the current build and sign into an authorized local instance. / 启动当前构建并登录授权的本地实例。
